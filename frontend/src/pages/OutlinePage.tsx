@@ -35,6 +35,10 @@ type OutlineGenForm = {
 };
 
 type OutlineLoaded = { outlines: OutlineListItem[]; outline: Outline; preset: LLMPreset };
+const STREAM_RAW_MAX_CHARS = 36000;
+const STREAM_RAW_PREFIX_RE = /^\[raw 已截断前 \d+ 字符，仅保留最近 \d+ 字符\]\n/;
+const STREAM_CONNECT_MAX_RETRIES = 2;
+const STREAM_CONNECT_RETRY_BASE_DELAY_MS = 1200;
 
 function extractOutlineChapters(structure: unknown): OutlineGenChapter[] {
   if (!structure || typeof structure !== "object") return [];
@@ -107,6 +111,21 @@ function toFinalPreviewJson(result: OutlineGenResult): string {
   );
 }
 
+function appendCappedRawText(prev: string, chunk: string, maxChars = STREAM_RAW_MAX_CHARS): string {
+  if (!chunk) return prev;
+  const previousBody = prev.replace(STREAM_RAW_PREFIX_RE, "");
+  const merged = `${previousBody}${chunk}`;
+  if (merged.length <= maxChars) return merged;
+  const omitted = merged.length - maxChars;
+  return `[raw 已截断前 ${omitted} 字符，仅保留最近 ${maxChars} 字符]\n${merged.slice(-maxChars)}`;
+}
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    globalThis.setTimeout(resolve, ms);
+  });
+}
+
 export function OutlinePage() {
   const { projectId } = useParams();
   const toast = useToast();
@@ -134,7 +153,8 @@ export function OutlinePage() {
     progress: number;
     status: string;
   } | null>(null);
-  const [genStreamText, setGenStreamText] = useState("");
+  const [genStreamRawText, setGenStreamRawText] = useState("");
+  const [genStreamPreviewJson, setGenStreamPreviewJson] = useState("");
   const genStreamClientRef = useRef<SSEPostClient | null>(null);
   const genStreamHasChunkRef = useRef(false);
   const wizardRefreshTimerRef = useRef<number | null>(null);
@@ -782,15 +802,33 @@ export function OutlinePage() {
               </div>
             ) : null}
 
-            {genStreamText ? (
-              <details className="panel p-3" open={generating}>
+            {genStreamPreviewJson ? (
+              <details className="panel p-3" open>
                 <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                  流式输出预览（raw）
+                  实时章节预览（JSON）
+                  {genPreview ? ` · 已解析 ${genPreview.chapters.length} 章` : ""}
                 </summary>
                 <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words text-xs text-ink">
-                  {genStreamText}
+                  {genStreamPreviewJson}
                 </pre>
               </details>
+            ) : generating ? (
+              <div className="panel p-3 text-xs text-subtext">实时章节预览（JSON）：等待首批章节返回...</div>
+            ) : null}
+
+            {genStreamRawText ? (
+              <details className="panel p-3" open={generating}>
+                <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
+                  流式原始片段（raw）
+                </summary>
+                <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words text-xs text-ink">
+                  {genStreamRawText}
+                </pre>
+              </details>
+            ) : generating ? (
+              <div className="panel p-3 text-xs text-subtext">
+                流式原始片段（raw）：暂未收到输出，等待当前分段完成...
+              </div>
             ) : null}
           </div>
         ) : null}
@@ -828,7 +866,9 @@ export function OutlinePage() {
               setGenerating(true);
               genStreamClientRef.current = null;
               genStreamHasChunkRef.current = false;
-              setGenStreamText("");
+              setGenPreview(null);
+              setGenStreamRawText("");
+              setGenStreamPreviewJson("");
               setGenStreamProgress(null);
               try {
                 const headers: Record<string, string> = { "X-LLM-Provider": preset.provider };
@@ -848,34 +888,64 @@ export function OutlinePage() {
                   setGenStreamProgress({ message: "开始生成...", progress: 0, status: "processing" });
                   let streamRawText = "";
                   let streamResult: OutlineGenResult | null = null;
+                  let streamConnectRetryCount = 0;
 
                   const applyStreamResult = (candidate: unknown, fallbackRaw = ""): boolean => {
                     const normalized = normalizeOutlineGenResult(candidate, fallbackRaw);
                     if (!normalized) return false;
                     streamResult = normalized;
                     setGenPreview(normalized);
-                    setGenStreamText(toFinalPreviewJson(normalized));
+                    setGenStreamPreviewJson(toFinalPreviewJson(normalized));
                     return true;
                   };
 
-                  const client = new SSEPostClient(`/api/projects/${projectId}/outline/generate-stream`, payload, {
-                    headers,
-                    onProgress: ({ message, progress, status }) => {
-                      setGenStreamProgress({ message, progress, status });
-                    },
-                    onChunk: (content) => {
-                      genStreamHasChunkRef.current = true;
-                      streamRawText += content;
-                      setGenStreamText((prev) => prev + content);
-                    },
-                    onResult: (data) => {
-                      void applyStreamResult(data, streamRawText);
-                    },
-                  });
-                  genStreamClientRef.current = client;
+                  const isTransientStreamError = (err: unknown): err is SSEError =>
+                    err instanceof SSEError && err.code !== "SSE_SERVER_ERROR" && err.code !== "ABORTED";
 
                   try {
-                    const done = await client.connect();
+                    let done: { requestId?: string; result?: unknown; accumulatedContent: string } | null = null;
+
+                    while (streamConnectRetryCount <= STREAM_CONNECT_MAX_RETRIES) {
+                      const client = new SSEPostClient(`/api/projects/${projectId}/outline/generate-stream`, payload, {
+                        headers,
+                        onProgress: ({ message, progress, status }) => {
+                          setGenStreamProgress({ message, progress, status });
+                        },
+                        onChunk: (content) => {
+                          genStreamHasChunkRef.current = true;
+                          streamRawText += content;
+                          setGenStreamRawText((prev) => appendCappedRawText(prev, content));
+                        },
+                        onResult: (data) => {
+                          void applyStreamResult(data, streamRawText);
+                        },
+                      });
+                      genStreamClientRef.current = client;
+                      try {
+                        done = await client.connect();
+                        break;
+                      } catch (connectErr) {
+                        if (
+                          isTransientStreamError(connectErr) &&
+                          !genStreamHasChunkRef.current &&
+                          streamConnectRetryCount < STREAM_CONNECT_MAX_RETRIES
+                        ) {
+                          streamConnectRetryCount += 1;
+                          const delayMs = STREAM_CONNECT_RETRY_BASE_DELAY_MS * streamConnectRetryCount;
+                          setGenStreamProgress((prev) => ({
+                            message: `流式连接中断，${Math.ceil(delayMs / 1000)} 秒后自动重连（${streamConnectRetryCount}/${STREAM_CONNECT_MAX_RETRIES}）...`,
+                            progress: prev?.progress ?? 0,
+                            status: "processing",
+                          }));
+                          await waitMs(delayMs);
+                          continue;
+                        }
+                        throw connectErr;
+                      }
+                    }
+                    if (!done) {
+                      throw new SSEError({ code: "SSE_STREAM_ERROR", message: "流式重连后仍失败" });
+                    }
                     if (!streamResult) {
                       const doneApplied = applyStreamResult(done.result, done.accumulatedContent || streamRawText);
                       if (!doneApplied) {
@@ -883,7 +953,7 @@ export function OutlinePage() {
                         if (parsedFromRaw) {
                           streamResult = parsedFromRaw;
                           setGenPreview(parsedFromRaw);
-                          setGenStreamText(toFinalPreviewJson(parsedFromRaw));
+                          setGenStreamPreviewJson(toFinalPreviewJson(parsedFromRaw));
                         }
                       }
                     }
@@ -914,7 +984,7 @@ export function OutlinePage() {
                         const normalized = normalizeOutlineGenResult(res.data, "");
                         setGenPreview(normalized ?? res.data);
                         if (normalized) {
-                          setGenStreamText(toFinalPreviewJson(normalized));
+                          setGenStreamPreviewJson(toFinalPreviewJson(normalized));
                         }
                         setGenStreamProgress(null);
                         toast.toastSuccess("生成完成");

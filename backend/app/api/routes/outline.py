@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ from app.services.generation_service import (
 from app.services.llm_task_preset_resolver import resolve_task_llm_config
 from app.services.outline_store import ensure_active_outline
 from app.services.output_contracts import build_repair_prompt_for_task, contract_for_task
+from app.services.output_parsers import extract_json_value, likely_truncated_json
 from app.services.prompt_presets import render_preset_for_task
 from app.services.prompt_store import format_characters
 from app.services.run_store import write_generation_run
@@ -56,8 +58,25 @@ OUTLINE_FILL_STAGNANT_ROUNDS_LIMIT = 3
 OUTLINE_FILL_MAX_TOTAL_ATTEMPTS = 48
 OUTLINE_FILL_HEARTBEAT_INTERVAL_SECONDS = 1.0
 OUTLINE_FILL_POLL_INTERVAL_SECONDS = 0.2
+OUTLINE_GAP_REPAIR_MAX_MISSING = 120
+OUTLINE_GAP_REPAIR_BATCH_SIZE = 4
+OUTLINE_GAP_REPAIR_STAGNANT_LIMIT = 4
+OUTLINE_GAP_REPAIR_FINAL_SWEEP_MAX_MISSING = 36
+OUTLINE_GAP_REPAIR_FINAL_SWEEP_ATTEMPTS_PER_CHAPTER = 3
+OUTLINE_SEGMENT_TRIGGER_CHAPTER_COUNT = 80
+OUTLINE_SEGMENT_MIN_BATCH_SIZE = 6
+OUTLINE_SEGMENT_MAX_BATCH_SIZE = 12
+OUTLINE_SEGMENT_DEFAULT_BATCH_SIZE = 10
+OUTLINE_SEGMENT_MAX_ATTEMPTS_PER_BATCH = 6
+OUTLINE_SEGMENT_STAGNANT_ATTEMPTS_LIMIT = 3
+OUTLINE_SEGMENT_RECENT_CONTEXT_WINDOW = 24
+OUTLINE_SEGMENT_INDEX_MAX_ITEMS = 140
+OUTLINE_SEGMENT_INDEX_MAX_CHARS = 6000
+OUTLINE_SEGMENT_RECENT_WINDOW_MAX_CHARS = 2800
+OUTLINE_STREAM_RAW_PREVIEW_MAX_CHARS = 1800
 
 OutlineFillProgressHook = Callable[[dict[str, object]], None]
+OutlineSegmentProgressHook = Callable[[dict[str, object]], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +89,18 @@ class _PreparedOutlineGeneration:
     llm_call: PreparedLlmCall
     target_chapter_count: int | None
     run_params_extra_json: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _OutlineSegmentGenerationResult:
+    data: dict[str, object]
+    warnings: list[str]
+    parse_error: dict[str, object] | None
+    run_ids: list[str]
+    latency_ms: int
+    dropped_params: list[str]
+    finish_reasons: list[str]
+    meta: dict[str, object]
 
 
 def _prepare_outline_generation(
@@ -339,6 +370,802 @@ def _recommend_outline_max_tokens(
     return wanted if wanted > 0 else None
 
 
+def _should_use_outline_segmented_mode(target_chapter_count: int | None) -> bool:
+    return bool(target_chapter_count and target_chapter_count >= OUTLINE_SEGMENT_TRIGGER_CHAPTER_COUNT)
+
+
+def _outline_segment_batch_size_for_target(target_chapter_count: int) -> int:
+    if target_chapter_count <= 120:
+        return OUTLINE_SEGMENT_MAX_BATCH_SIZE
+    if target_chapter_count <= 500:
+        return OUTLINE_SEGMENT_DEFAULT_BATCH_SIZE
+    return max(OUTLINE_SEGMENT_MIN_BATCH_SIZE, OUTLINE_SEGMENT_DEFAULT_BATCH_SIZE - 2)
+
+
+def _outline_segment_max_attempts_for_batch(requested_count: int) -> int:
+    if requested_count <= 0:
+        return 1
+    estimated = max(3, ((requested_count + 2) // 3) + 1)
+    return min(OUTLINE_SEGMENT_MAX_ATTEMPTS_PER_BATCH, estimated)
+
+
+def _outline_segment_batches(target_chapter_count: int, batch_size: int) -> list[list[int]]:
+    size = max(OUTLINE_SEGMENT_MIN_BATCH_SIZE, min(OUTLINE_SEGMENT_MAX_BATCH_SIZE, int(batch_size)))
+    out: list[list[int]] = []
+    start = 1
+    while start <= target_chapter_count:
+        end = min(target_chapter_count, start + size - 1)
+        out.append(list(range(start, end + 1)))
+        start = end + 1
+    return out
+
+
+def _shrink_outline_segment_items(
+    items: list[dict[str, object]],
+    *,
+    max_items: int,
+    max_chars: int,
+) -> list[dict[str, object]]:
+    if not items:
+        return []
+    sampled = list(items)
+    if len(sampled) > max_items:
+        head = max(20, max_items // 2)
+        tail = max_items - head
+        sampled = [*sampled[:head], *sampled[-tail:]]
+
+    payload = json.dumps({"items": sampled}, ensure_ascii=False)
+    if len(payload) <= max_chars:
+        return sampled
+
+    compact = list(sampled)
+    while len(compact) > 32:
+        compact = [*compact[: len(compact) // 2], *compact[-max(1, len(compact) // 4) :]]
+        payload = json.dumps({"items": compact}, ensure_ascii=False)
+        if len(payload) <= max_chars:
+            return compact
+    return compact
+
+
+def _strip_segment_conflicting_prompt_sections(text: str) -> str:
+    if not text.strip():
+        return text
+    # Segmented mode should not retain "single response must cover all chapters" instructions.
+    without_target = re.sub(r"(?is)<\s*CHAPTER_TARGET\s*>[\s\S]*?<\s*/\s*CHAPTER_TARGET\s*>", "", text)
+    return without_target.strip()
+
+
+def _build_outline_segment_chapter_index(chapters: list[dict[str, object]]) -> str:
+    items: list[dict[str, object]] = []
+    for chapter in chapters:
+        try:
+            number = int(chapter.get("number"))
+        except Exception:
+            continue
+        if number <= 0:
+            continue
+        title = str(chapter.get("title") or "").strip()
+        items.append({"number": number, "title": title[:28]})
+    items.sort(key=lambda row: int(row.get("number") or 0))
+    total = len(items)
+    sampled = _shrink_outline_segment_items(
+        items,
+        max_items=OUTLINE_SEGMENT_INDEX_MAX_ITEMS,
+        max_chars=OUTLINE_SEGMENT_INDEX_MAX_CHARS,
+    )
+    payload: dict[str, object] = {"total": total, "items": sampled}
+    omitted = total - len(sampled)
+    if omitted > 0:
+        payload["omitted"] = omitted
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _build_outline_segment_recent_window(chapters: list[dict[str, object]]) -> str:
+    if not chapters:
+        return "[]"
+    window = chapters[-OUTLINE_SEGMENT_RECENT_CONTEXT_WINDOW:]
+    items: list[dict[str, object]] = []
+    for chapter in window:
+        try:
+            number = int(chapter.get("number"))
+        except Exception:
+            continue
+        if number <= 0:
+            continue
+        title = str(chapter.get("title") or "").strip()
+        beats_raw = chapter.get("beats")
+        beats: list[str] = []
+        if isinstance(beats_raw, list):
+            for beat in beats_raw:
+                text = str(beat).strip()
+                if text:
+                    beats.append(text[:64])
+                if len(beats) >= 3:
+                    break
+        items.append({"number": number, "title": title[:28], "beats": beats})
+    text = json.dumps(items, ensure_ascii=False)
+    if len(text) <= OUTLINE_SEGMENT_RECENT_WINDOW_MAX_CHARS:
+        return text
+    compact: list[dict[str, object]] = []
+    for row in items:
+        compact.append(
+            {
+                "number": int(row.get("number") or 0),
+                "title": str(row.get("title") or "")[:18],
+                "beats": [str(x)[:40] for x in (row.get("beats") if isinstance(row.get("beats"), list) else [])[:2]],
+            }
+        )
+    return json.dumps(compact, ensure_ascii=False)
+
+
+def _recommend_outline_segment_max_tokens(
+    *,
+    requested_count: int,
+    provider: str,
+    model: str | None,
+    current_max_tokens: int | None,
+) -> int | None:
+    if requested_count <= 0:
+        return None
+    wanted = max(1800, min(4200, 1200 + requested_count * 230))
+    limit = max_output_tokens_limit(provider, model)
+    if isinstance(limit, int) and limit > 0:
+        wanted = min(wanted, int(limit))
+    if isinstance(current_max_tokens, int) and current_max_tokens >= wanted:
+        return None
+    return wanted if wanted > 0 else None
+
+
+def _build_outline_stream_raw_preview(
+    text: object,
+    *,
+    max_chars: int = OUTLINE_STREAM_RAW_PREVIEW_MAX_CHARS,
+) -> str:
+    if not isinstance(text, str):
+        return ""
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+    if len(cleaned) <= max_chars:
+        return cleaned
+    omitted = len(cleaned) - max_chars
+    return f"{cleaned[:max_chars]}\n...(已截断 {omitted} 字符)"
+
+
+def _parse_outline_batch_output(
+    *,
+    text: str,
+    finish_reason: str | None = None,
+    fallback_outline_md: str | None = None,
+) -> tuple[dict[str, object], list[str], dict[str, object] | None]:
+    warnings: list[str] = []
+    value, raw_json = extract_json_value(text)
+    if not isinstance(value, dict):
+        parse_error: dict[str, object] = {"code": "OUTLINE_PARSE_ERROR", "message": "无法从模型输出解析章节结构"}
+        if finish_reason == "length" or likely_truncated_json(text):
+            parse_error["hint"] = "输出疑似被截断（JSON 未闭合），将自动重试当前分段"
+        data = {"outline_md": str(fallback_outline_md or ""), "chapters": [], "raw_output": text}
+        return data, warnings, parse_error
+
+    outline_md_raw = value.get("outline_md")
+    outline_md = outline_md_raw.strip() if isinstance(outline_md_raw, str) else ""
+    if not outline_md and isinstance(fallback_outline_md, str):
+        outline_md = fallback_outline_md.strip()
+
+    chapters_out, chapter_warnings = _normalize_outline_chapters(value.get("chapters"))
+    warnings.extend(chapter_warnings)
+    if finish_reason == "length":
+        warnings.append("output_truncated")
+
+    data: dict[str, object] = {"outline_md": outline_md, "chapters": chapters_out, "raw_output": text}
+    if raw_json:
+        data["raw_json"] = raw_json
+    if chapters_out:
+        return data, warnings, None
+
+    parse_error = {"code": "OUTLINE_PARSE_ERROR", "message": "无法从模型输出解析章节结构"}
+    if finish_reason == "length" or likely_truncated_json(text):
+        parse_error["hint"] = "输出疑似被截断（JSON 未闭合），将自动重试当前分段"
+    return data, warnings, parse_error
+
+
+def _build_outline_segment_prompts(
+    *,
+    base_prompt_system: str,
+    base_prompt_user: str,
+    target_chapter_count: int,
+    batch_numbers: list[int],
+    existing_chapters: list[dict[str, object]],
+    existing_outline_md: str,
+    attempt: int,
+    max_attempts: int,
+    previous_output_numbers: list[int] | None = None,
+    previous_failure_reason: str | None = None,
+) -> tuple[str, str]:
+    base_user = _strip_segment_conflicting_prompt_sections(base_prompt_user)
+    missing_ranges = _format_chapter_number_ranges(batch_numbers)
+    missing_numbers_json = json.dumps(batch_numbers, ensure_ascii=False)
+    detail_rule = _outline_fill_detail_rule(
+        target_chapter_count=target_chapter_count,
+        existing_chapters=existing_chapters,
+    )
+    existing_numbers_set: set[int] = set()
+    for chapter in existing_chapters:
+        try:
+            number = int(chapter.get("number"))
+        except Exception:
+            continue
+        if number > 0:
+            existing_numbers_set.add(number)
+    existing_numbers = sorted(existing_numbers_set)
+    existing_ranges = _format_chapter_number_ranges(existing_numbers)
+    chapter_index = _build_outline_segment_chapter_index(existing_chapters)
+    recent_window = _build_outline_segment_recent_window(existing_chapters)
+    outline_anchor = (existing_outline_md or "").strip()
+    if len(outline_anchor) > 3600:
+        outline_anchor = outline_anchor[:3600]
+    feedback_block = ""
+    if attempt > 1:
+        prev_numbers_text = _format_chapter_number_ranges(previous_output_numbers or [])
+        if not prev_numbers_text:
+            prev_numbers_text = "（无可识别章号）"
+        failure_reason = (previous_failure_reason or "上一轮输出未满足当前批次约束").strip()
+        feedback_block = (
+            "<LAST_ATTEMPT_FEEDBACK>\n"
+            f"上一轮失败原因：{failure_reason}\n"
+            f"上一轮输出章号：{prev_numbers_text}\n"
+            "本轮必须纠正：只输出当前批次章号数组对应的章节。\n"
+            "</LAST_ATTEMPT_FEEDBACK>\n"
+        )
+
+    system = (
+        f"{base_prompt_system}\n\n"
+        "[分段生成协议]\n"
+        "你现在处于“长篇章节分段生成”模式。\n"
+        "你必须只输出一个 JSON 对象，禁止任何解释、Markdown、代码块。\n"
+        'JSON 固定为：{"outline_md": string, "chapters":[{"number":int,"title":string,"beats":[string]}]}。\n'
+        "本轮只能输出要求章号，不能输出范围外章节。\n"
+        "本轮要求的每个章号必须出现且仅出现一次。\n"
+        "不得输出占位内容（如 TODO/待补全/略）。\n"
+    )
+    user = (
+        f"{base_user}\n\n"
+        "<SEGMENT_TASK>\n"
+        f"目标总章数：{target_chapter_count}\n"
+        f"当前批次缺失章号：{missing_ranges}\n"
+        f"当前批次章号数组（严格按此输出）：{missing_numbers_json}\n"
+        f"已完成章号（禁止输出）：{existing_ranges or '（空）'}\n"
+        f"当前尝试：第 {attempt}/{max_attempts} 轮（仅补当前批次缺失章号）\n"
+        f"已生成章节标题索引（全量，不可改写）：{chapter_index}\n"
+        f"最近章节细节（用于衔接语义）：{recent_window}\n"
+        f"全书总纲锚点（不可改写）：{outline_anchor}\n"
+        f"每章细节规则：{detail_rule}\n"
+        f"{feedback_block}"
+        "输出要求：\n"
+        "- chapters 只能包含当前批次缺失章号，且必须全部覆盖。\n"
+        "- number 必须严格等于指定章号，不得跳号/重号。\n"
+        "- 若输出任何已完成章号或范围外章号，本轮会被判定失败并重试。\n"
+        "- title 简洁明确，beats 使用短句、强调因果推进。\n"
+        "- outline_md 可沿用既有总纲，不得输出空对象或额外字段。\n"
+        "- 输出前自检：chapters.number 集合必须与当前批次章号数组完全一致。\n"
+        "</SEGMENT_TASK>"
+    )
+    return system, user
+
+
+def _outline_segment_progress_message(progress: dict[str, object] | None) -> str:
+    if not isinstance(progress, dict):
+        return "长篇分段生成中..."
+    event = str(progress.get("event") or "")
+    if event.startswith("fill_"):
+        mapped = dict(progress)
+        mapped["event"] = event.removeprefix("fill_")
+        return _outline_fill_progress_message(mapped)
+
+    batch_index = int(progress.get("batch_index") or 0)
+    batch_count = int(progress.get("batch_count") or 0)
+    range_text = str(progress.get("range") or "")
+    attempt = int(progress.get("attempt") or 0)
+    max_attempts = int(progress.get("max_attempts") or 0)
+    completed = int(progress.get("completed_count") or 0)
+    target = int(progress.get("target_chapter_count") or 0)
+    remaining = int(progress.get("remaining_count") or 0)
+
+    if event == "segment_start":
+        return f"长篇分段生成启动：共 {batch_count} 批"
+    if event == "batch_attempt_start":
+        return f"分段生成 第 {batch_index}/{batch_count} 批（章号 {range_text}），尝试 {attempt}/{max_attempts}"
+    if event == "batch_call_failed":
+        return f"分段生成 第 {batch_index}/{batch_count} 批调用失败，自动重试（{attempt}/{max_attempts}）"
+    if event == "batch_parse_failed":
+        return f"分段生成 第 {batch_index}/{batch_count} 批解析失败，自动重试（{attempt}/{max_attempts}）"
+    if event == "batch_no_progress":
+        return f"分段生成 第 {batch_index}/{batch_count} 批无有效新章，自动重试（{attempt}/{max_attempts}）"
+    if event == "batch_applied":
+        if target > 0:
+            return f"分段生成已完成 {completed}/{target} 章，剩余 {remaining} 章"
+        return "分段生成已应用一批结果"
+    if event == "batch_incomplete":
+        return f"分段生成 第 {batch_index}/{batch_count} 批未完全收敛，剩余 {remaining} 章"
+    if event == "segment_done":
+        return "分段生成完成"
+    if target > 0 and completed > 0:
+        return f"分段生成中... 已完成 {completed}/{target} 章"
+    return "长篇分段生成中..."
+
+
+def _extract_outline_chapter_numbers(chapters: list[dict[str, object]], *, limit: int = 64) -> list[int]:
+    numbers: set[int] = set()
+    for chapter in chapters:
+        try:
+            number = int(chapter.get("number"))
+        except Exception:
+            continue
+        if number <= 0:
+            continue
+        numbers.add(number)
+        if len(numbers) >= limit:
+            break
+    return sorted(numbers)
+
+
+def _merge_segment_chapters(
+    *,
+    by_number: dict[int, dict[str, object]],
+    incoming: list[dict[str, object]],
+    allowed_numbers: set[int],
+) -> tuple[int, list[int]]:
+    accepted = 0
+    accepted_numbers: list[int] = []
+    for chapter in incoming:
+        number = int(chapter.get("number") or 0)
+        if number <= 0 or number not in allowed_numbers:
+            continue
+        previous = by_number.get(number)
+        if previous is None:
+            by_number[number] = chapter
+            accepted += 1
+            accepted_numbers.append(number)
+            continue
+        if _chapter_score(chapter) > _chapter_score(previous):
+            by_number[number] = chapter
+    return accepted, accepted_numbers
+
+
+def _generate_outline_segmented_with_llm(
+    *,
+    request_id: str,
+    actor_user_id: str,
+    project_id: str,
+    api_key: str,
+    llm_call: PreparedLlmCall,
+    prompt_system: str,
+    prompt_user: str,
+    target_chapter_count: int,
+    run_params_extra_json: dict[str, object] | None,
+    progress_hook: OutlineSegmentProgressHook | None = None,
+) -> _OutlineSegmentGenerationResult:
+    warnings: list[str] = ["outline_segment_mode_enabled"]
+    run_ids: list[str] = []
+    dropped_params: list[str] = []
+    finish_reasons: list[str] = []
+    latency_ms_total = 0
+    outline_md = ""
+    chapters_by_number: dict[int, dict[str, object]] = {}
+    batch_size = _outline_segment_batch_size_for_target(target_chapter_count)
+    batches = _outline_segment_batches(target_chapter_count, batch_size=batch_size)
+    batch_count = len(batches)
+    parse_error: dict[str, object] | None = None
+
+    def _emit_progress(payload: dict[str, object]) -> None:
+        if progress_hook is None:
+            return
+        try:
+            progress_hook(payload)
+        except Exception:
+            return
+
+    _emit_progress(
+        {
+            "event": "segment_start",
+            "batch_count": batch_count,
+            "target_chapter_count": target_chapter_count,
+            "completed_count": 0,
+            "remaining_count": target_chapter_count,
+            "progress_percent": 12,
+        }
+    )
+
+    for batch_index, batch in enumerate(batches, start=1):
+        missing_numbers = [n for n in batch if n not in chapters_by_number]
+        if not missing_numbers:
+            continue
+        max_attempts = _outline_segment_max_attempts_for_batch(len(batch))
+        stagnant_attempts = 0
+        attempt = 0
+        last_failure_reason: str | None = None
+        last_output_numbers: list[int] | None = None
+
+        while missing_numbers and attempt < max_attempts:
+            attempt += 1
+            range_text = _format_chapter_number_ranges(batch)
+            _emit_progress(
+                {
+                    "event": "batch_attempt_start",
+                    "batch_index": batch_index,
+                    "batch_count": batch_count,
+                    "range": range_text,
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "target_chapter_count": target_chapter_count,
+                    "completed_count": len(chapters_by_number),
+                    "remaining_count": target_chapter_count - len(chapters_by_number),
+                    "progress_percent": 12 + int((batch_index - 1) / max(1, batch_count) * 70),
+                }
+            )
+            existing = [chapters_by_number[n] for n in sorted(chapters_by_number.keys())]
+            segment_system, segment_user = _build_outline_segment_prompts(
+                base_prompt_system=prompt_system,
+                base_prompt_user=prompt_user,
+                target_chapter_count=target_chapter_count,
+                batch_numbers=missing_numbers,
+                existing_chapters=existing,
+                existing_outline_md=outline_md,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                previous_output_numbers=last_output_numbers,
+                previous_failure_reason=last_failure_reason,
+            )
+
+            current_max_tokens = llm_call.params.get("max_tokens")
+            current_max_tokens_int = int(current_max_tokens) if isinstance(current_max_tokens, int) else None
+            segment_max_tokens = _recommend_outline_segment_max_tokens(
+                requested_count=len(missing_numbers),
+                provider=llm_call.provider,
+                model=llm_call.model,
+                current_max_tokens=current_max_tokens_int,
+            )
+            segment_call = with_param_overrides(llm_call, {"max_tokens": segment_max_tokens}) if segment_max_tokens else llm_call
+
+            segment_extra = dict(run_params_extra_json or {})
+            segment_extra["outline_segment"] = {
+                "batch_index": batch_index,
+                "batch_count": batch_count,
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "target_chapter_count": target_chapter_count,
+                "batch_numbers": missing_numbers,
+            }
+            try:
+                segment_res = call_llm_and_record(
+                    logger=logger,
+                    request_id=request_id,
+                    actor_user_id=actor_user_id,
+                    project_id=project_id,
+                    chapter_id=None,
+                    run_type="outline_segment",
+                    api_key=api_key,
+                    prompt_system=segment_system,
+                    prompt_user=segment_user,
+                    llm_call=segment_call,
+                    run_params_extra_json=segment_extra,
+                )
+            except AppError as exc:
+                warnings.append("outline_segment_call_failed")
+                if exc.code == "LLM_TIMEOUT":
+                    warnings.append("outline_segment_timeout")
+                last_failure_reason = f"模型调用失败（{exc.code}）"
+                last_output_numbers = None
+                stagnant_attempts += 1
+                _emit_progress(
+                    {
+                        "event": "batch_call_failed",
+                        "batch_index": batch_index,
+                        "batch_count": batch_count,
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "target_chapter_count": target_chapter_count,
+                        "completed_count": len(chapters_by_number),
+                        "remaining_count": target_chapter_count - len(chapters_by_number),
+                        "failure_reason": last_failure_reason,
+                        "progress_percent": 12 + int(min(1.0, len(chapters_by_number) / max(1, target_chapter_count)) * 70),
+                    }
+                )
+                if stagnant_attempts >= OUTLINE_SEGMENT_STAGNANT_ATTEMPTS_LIMIT:
+                    break
+                continue
+
+            if segment_res.run_id not in run_ids:
+                run_ids.append(segment_res.run_id)
+            latency_ms_total += int(segment_res.latency_ms or 0)
+            if segment_res.finish_reason is not None:
+                finish_reasons.append(segment_res.finish_reason)
+            for item in segment_res.dropped_params:
+                if item not in dropped_params:
+                    dropped_params.append(item)
+            segment_raw_preview = _build_outline_stream_raw_preview(segment_res.text)
+            segment_raw_chars = len(segment_res.text or "")
+
+            parsed_data, parsed_warnings, parsed_error = _parse_outline_batch_output(
+                text=segment_res.text,
+                finish_reason=segment_res.finish_reason,
+                fallback_outline_md=outline_md,
+            )
+            warnings.extend(parsed_warnings)
+            if parsed_error is not None:
+                warnings.append("outline_segment_parse_failed")
+                if segment_res.finish_reason == "length":
+                    warnings.append("outline_segment_truncated")
+                last_failure_reason = str(parsed_error.get("message") or "输出解析失败")
+                last_output_numbers = None
+                _emit_progress(
+                    {
+                        "event": "batch_parse_failed",
+                        "batch_index": batch_index,
+                        "batch_count": batch_count,
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "range": range_text,
+                        "target_chapter_count": target_chapter_count,
+                        "completed_count": len(chapters_by_number),
+                        "remaining_count": target_chapter_count - len(chapters_by_number),
+                        "raw_output_preview": segment_raw_preview,
+                        "raw_output_chars": segment_raw_chars,
+                        "failure_reason": last_failure_reason,
+                        "progress_percent": 12 + int(min(1.0, len(chapters_by_number) / max(1, target_chapter_count)) * 70),
+                    }
+                )
+                stagnant_attempts += 1
+                if stagnant_attempts >= OUTLINE_SEGMENT_STAGNANT_ATTEMPTS_LIMIT:
+                    break
+                continue
+
+            parsed_outline_md = str(parsed_data.get("outline_md") or "").strip()
+            if parsed_outline_md and not outline_md:
+                outline_md = parsed_outline_md
+
+            incoming = parsed_data.get("chapters")
+            incoming_chapters = incoming if isinstance(incoming, list) else []
+            incoming_numbers = _extract_outline_chapter_numbers(incoming_chapters, limit=120)
+            accepted, accepted_numbers = _merge_segment_chapters(
+                by_number=chapters_by_number,
+                incoming=incoming_chapters,
+                allowed_numbers=set(missing_numbers),
+            )
+            if accepted <= 0:
+                warnings.append("outline_segment_no_progress")
+                missing_set = set(missing_numbers)
+                overlap_numbers = [n for n in incoming_numbers if n in missing_set]
+                if incoming_numbers and not overlap_numbers:
+                    last_failure_reason = "输出章号与当前批次不匹配（疑似重复旧章节）"
+                elif incoming_numbers:
+                    last_failure_reason = "输出章号包含目标范围，但未形成可采纳新章节"
+                else:
+                    last_failure_reason = "未输出可识别章节"
+                last_output_numbers = incoming_numbers
+                _emit_progress(
+                    {
+                        "event": "batch_no_progress",
+                        "batch_index": batch_index,
+                        "batch_count": batch_count,
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "range": range_text,
+                        "incoming_numbers": incoming_numbers,
+                        "incoming_numbers_text": _format_chapter_number_ranges(incoming_numbers),
+                        "target_chapter_count": target_chapter_count,
+                        "completed_count": len(chapters_by_number),
+                        "remaining_count": target_chapter_count - len(chapters_by_number),
+                        "raw_output_preview": segment_raw_preview,
+                        "raw_output_chars": segment_raw_chars,
+                        "failure_reason": last_failure_reason,
+                        "progress_percent": 12 + int(min(1.0, len(chapters_by_number) / max(1, target_chapter_count)) * 70),
+                    }
+                )
+                stagnant_attempts += 1
+                if stagnant_attempts >= OUTLINE_SEGMENT_STAGNANT_ATTEMPTS_LIMIT:
+                    break
+                continue
+
+            warnings.append("outline_segment_applied")
+            last_failure_reason = None
+            last_output_numbers = None
+            stagnant_attempts = 0
+            missing_numbers = [n for n in batch if n not in chapters_by_number]
+            chapters_snapshot = _clone_outline_chapters([chapters_by_number[n] for n in sorted(chapters_by_number.keys())])
+            _emit_progress(
+                {
+                    "event": "batch_applied",
+                    "batch_index": batch_index,
+                    "batch_count": batch_count,
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "range": range_text,
+                    "accepted": accepted,
+                    "accepted_numbers": accepted_numbers,
+                    "chapters_snapshot": chapters_snapshot,
+                    "outline_md": outline_md,
+                    "target_chapter_count": target_chapter_count,
+                    "completed_count": len(chapters_snapshot),
+                    "remaining_count": target_chapter_count - len(chapters_snapshot),
+                    "raw_output_preview": segment_raw_preview,
+                    "raw_output_chars": segment_raw_chars,
+                    "progress_percent": 12 + int(min(1.0, len(chapters_snapshot) / max(1, target_chapter_count)) * 80),
+                }
+            )
+
+        if missing_numbers:
+            warnings.append("outline_segment_batch_incomplete")
+            chapters_snapshot = _clone_outline_chapters([chapters_by_number[n] for n in sorted(chapters_by_number.keys())])
+            _emit_progress(
+                {
+                    "event": "batch_incomplete",
+                    "batch_index": batch_index,
+                    "batch_count": batch_count,
+                    "range": _format_chapter_number_ranges(batch),
+                    "target_chapter_count": target_chapter_count,
+                    "completed_count": len(chapters_snapshot),
+                    "remaining_count": target_chapter_count - len(chapters_snapshot),
+                    "progress_percent": 90,
+                }
+            )
+
+    chapters_now = [chapters_by_number[n] for n in sorted(chapters_by_number.keys())]
+    if not outline_md:
+        outline_md = "## AI 大纲\n\n- 分段生成完成，请按需要补充总纲摘要。"
+        warnings.append("outline_segment_outline_md_fallback")
+    data: dict[str, object] = {"outline_md": outline_md, "chapters": chapters_now}
+    data, coverage_warnings = _enforce_outline_chapter_coverage(data=data, target_chapter_count=target_chapter_count)
+    warnings.extend(coverage_warnings)
+
+    def _forward_fill_progress(update: dict[str, object]) -> None:
+        if not isinstance(update, dict):
+            return
+        mapped = dict(update)
+        mapped["event"] = f"fill_{mapped.get('event')}"
+        mapped["target_chapter_count"] = target_chapter_count
+        chapters_snapshot = mapped.get("chapters_snapshot")
+        if isinstance(chapters_snapshot, list):
+            mapped["completed_count"] = len(chapters_snapshot)
+        else:
+            chapter_count_raw = mapped.get("chapter_count")
+            if isinstance(chapter_count_raw, int):
+                mapped["completed_count"] = chapter_count_raw
+            else:
+                mapped["completed_count"] = len(data.get("chapters") or [])
+        mapped["progress_percent"] = 94
+        _emit_progress(mapped)
+
+    data, fill_warnings, fill_run_ids = _fill_outline_missing_chapters_with_llm(
+        data=data,
+        target_chapter_count=target_chapter_count,
+        request_id=request_id,
+        actor_user_id=actor_user_id,
+        project_id=project_id,
+        api_key=api_key,
+        llm_call=llm_call,
+        run_params_extra_json=run_params_extra_json,
+        progress_hook=_forward_fill_progress if progress_hook is not None else None,
+    )
+    warnings.extend(fill_warnings)
+    for rid in fill_run_ids:
+        if rid not in run_ids:
+            run_ids.append(rid)
+
+    chapters_final = data.get("chapters")
+    chapters_final_count = len(chapters_final) if isinstance(chapters_final, list) else 0
+    if chapters_final_count <= 0:
+        parse_error = {"code": "OUTLINE_PARSE_ERROR", "message": "分段生成未得到可用章节结构"}
+
+    coverage = data.get("chapter_coverage")
+    if isinstance(coverage, dict):
+        coverage["segment_batch_size"] = batch_size
+        coverage["segment_batch_count"] = batch_count
+        coverage["segment_run_ids"] = run_ids
+        data["chapter_coverage"] = coverage
+
+    _emit_progress(
+        {
+            "event": "segment_done",
+            "batch_count": batch_count,
+            "target_chapter_count": target_chapter_count,
+            "completed_count": chapters_final_count,
+            "remaining_count": max(0, target_chapter_count - chapters_final_count),
+            "progress_percent": 98,
+        }
+    )
+
+    meta: dict[str, object] = {
+        "mode": "segmented",
+        "target_chapter_count": target_chapter_count,
+        "batch_size": batch_size,
+        "batch_count": batch_count,
+        "run_count": len(run_ids),
+    }
+    return _OutlineSegmentGenerationResult(
+        data=data,
+        warnings=_dedupe_warnings(warnings),
+        parse_error=parse_error,
+        run_ids=run_ids,
+        latency_ms=latency_ms_total,
+        dropped_params=dropped_params,
+        finish_reasons=finish_reasons,
+        meta=meta,
+    )
+
+
+def _build_outline_segment_aggregate_output_text(
+    *,
+    data: dict[str, object],
+    warnings: list[str],
+    meta: dict[str, object],
+) -> str:
+    chapters = data.get("chapters")
+    chapter_count = len(chapters) if isinstance(chapters, list) else 0
+    coverage = data.get("chapter_coverage")
+    summary: dict[str, object] = {
+        "mode": "segmented",
+        "chapter_count": chapter_count,
+        "warnings": warnings[:40],
+        "segmented_generation": meta,
+    }
+    if isinstance(coverage, dict):
+        summary["chapter_coverage"] = {
+            "target_chapter_count": coverage.get("target_chapter_count"),
+            "missing_count": coverage.get("missing_count"),
+            "missing_numbers_preview": (coverage.get("missing_numbers") or [])[:30]
+            if isinstance(coverage.get("missing_numbers"), list)
+            else [],
+        }
+    return json.dumps(summary, ensure_ascii=False)
+
+
+def _write_outline_segmented_aggregate_run(
+    *,
+    request_id: str,
+    actor_user_id: str,
+    project_id: str,
+    run_type: str,
+    llm_call: PreparedLlmCall,
+    prompt_system: str,
+    prompt_user: str,
+    prompt_render_log_json: str | None,
+    run_params_json: str,
+    data: dict[str, object],
+    warnings: list[str],
+    parse_error: dict[str, object] | None,
+    segmented_run_ids: list[str],
+    meta: dict[str, object],
+) -> str:
+    output_text = _build_outline_segment_aggregate_output_text(data=data, warnings=warnings, meta=meta)
+    error_json: str | None = None
+    if parse_error is not None:
+        error_payload = {
+            "code": str(parse_error.get("code") or "OUTLINE_PARSE_ERROR"),
+            "message": str(parse_error.get("message") or "分段生成结果不完整"),
+            "details": {
+                "segmented_run_ids": segmented_run_ids,
+                "segmented_generation": meta,
+            },
+        }
+        error_json = json.dumps(error_payload, ensure_ascii=False)
+    return write_generation_run(
+        request_id=request_id,
+        actor_user_id=actor_user_id,
+        project_id=project_id,
+        chapter_id=None,
+        run_type=run_type,
+        provider=llm_call.provider,
+        model=llm_call.model,
+        prompt_system=prompt_system,
+        prompt_user=prompt_user,
+        prompt_render_log_json=prompt_render_log_json,
+        params_json=run_params_json,
+        output_text=output_text,
+        error_json=error_json,
+    )
+
+
 def _dedupe_warnings(values: list[str]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -472,6 +1299,83 @@ def _format_chapter_number_ranges(numbers: list[int]) -> str:
     return ", ".join(ranges)
 
 
+def _compact_neighbor_chapter(chapter: dict[str, object] | None) -> dict[str, object] | None:
+    if not isinstance(chapter, dict):
+        return None
+    try:
+        number = int(chapter.get("number"))
+    except Exception:
+        return None
+    if number <= 0:
+        return None
+    title = str(chapter.get("title") or "")[:28]
+    beats_raw = chapter.get("beats")
+    beats: list[str] = []
+    if isinstance(beats_raw, list):
+        for beat in beats_raw:
+            text = str(beat).strip()
+            if text:
+                beats.append(text[:52])
+            if len(beats) >= 2:
+                break
+    return {"number": number, "title": title, "beats": beats}
+
+
+def _build_missing_neighbor_context(
+    existing_chapters: list[dict[str, object]],
+    missing_numbers: list[int],
+    *,
+    max_items: int = 24,
+    max_chars: int = 2400,
+) -> str:
+    if not existing_chapters or not missing_numbers:
+        return "[]"
+
+    by_number: dict[int, dict[str, object]] = {}
+    for chapter in existing_chapters:
+        try:
+            number = int(chapter.get("number"))
+        except Exception:
+            continue
+        if number > 0:
+            by_number[number] = chapter
+
+    contexts: list[dict[str, object]] = []
+    for number in sorted(set(int(n) for n in missing_numbers if int(n) > 0)):
+        row: dict[str, object] = {"number": number}
+        prev_compact = _compact_neighbor_chapter(by_number.get(number - 1))
+        next_compact = _compact_neighbor_chapter(by_number.get(number + 1))
+        if prev_compact is not None:
+            row["prev"] = prev_compact
+        if next_compact is not None:
+            row["next"] = next_compact
+        contexts.append(row)
+        if len(contexts) >= max_items:
+            break
+
+    text = json.dumps(contexts, ensure_ascii=False)
+    if len(text) <= max_chars:
+        return text
+
+    compact_rows: list[dict[str, object]] = []
+    for row in contexts:
+        slim: dict[str, object] = {"number": int(row.get("number") or 0)}
+        prev_row = row.get("prev")
+        if isinstance(prev_row, dict):
+            slim["prev"] = {
+                "number": int(prev_row.get("number") or 0),
+                "title": str(prev_row.get("title") or "")[:18],
+            }
+        next_row = row.get("next")
+        if isinstance(next_row, dict):
+            slim["next"] = {
+                "number": int(next_row.get("number") or 0),
+                "title": str(next_row.get("title") or "")[:18],
+            }
+        compact_rows.append(slim)
+    return json.dumps(compact_rows, ensure_ascii=False)
+
+
 def _outline_fill_batch_size_for_missing(missing_count: int) -> int:
     if missing_count <= 0:
         return OUTLINE_FILL_MIN_BATCH_SIZE
@@ -499,12 +1403,34 @@ def _outline_fill_max_attempts_for_missing(missing_count: int) -> int:
 def _outline_fill_progress_message(progress: dict[str, object] | None) -> str:
     if not isinstance(progress, dict):
         return "补全缺失章节..."
+    event = str(progress.get("event") or "")
     remaining_raw = progress.get("remaining_count")
     remaining = int(remaining_raw) if isinstance(remaining_raw, int) else 0
     attempt_raw = progress.get("attempt")
     attempt = int(attempt_raw) if isinstance(attempt_raw, int) else 0
     max_attempts_raw = progress.get("max_attempts")
     max_attempts = int(max_attempts_raw) if isinstance(max_attempts_raw, int) else 0
+    if event.startswith("gap_repair"):
+        if event == "gap_repair_final_sweep_start":
+            return f"终检兜底启动：剩余 {remaining} 章"
+        if event == "gap_repair_final_sweep_attempt_start":
+            return f"终检兜底中... 第 {attempt}/{max_attempts} 轮，剩余 {remaining} 章"
+        if event == "gap_repair_final_sweep_applied":
+            return f"终检兜底已插入，剩余 {remaining} 章"
+        if event == "gap_repair_final_sweep_done":
+            if remaining > 0:
+                return f"终检兜底结束，仍缺 {remaining} 章"
+            return "终检兜底完成，章节已齐全"
+        if event == "gap_repair_start":
+            return f"终检补全启动：剩余 {remaining} 章待修复"
+        if event == "gap_repair_attempt_start":
+            return f"终检补全中... 第 {attempt}/{max_attempts} 轮，剩余 {remaining} 章"
+        if event == "gap_repair_applied":
+            return f"终检补全已应用，剩余 {remaining} 章"
+        if event == "gap_repair_done":
+            if remaining > 0:
+                return f"终检补全结束，仍缺 {remaining} 章"
+            return "终检补全完成，章节已齐全"
     if attempt > 0 and max_attempts > 0 and remaining > 0:
         return f"补全缺失章节... 第 {attempt}/{max_attempts} 轮，剩余 {remaining} 章"
     if remaining > 0:
@@ -564,6 +1490,20 @@ def _build_outline_missing_chapters_prompts(
         target_chapter_count=target_chapter_count,
         existing_chapters=existing_chapters,
     )
+    missing_numbers_json = json.dumps(sorted(set(int(n) for n in missing_numbers if int(n) > 0)), ensure_ascii=False)
+    existing_numbers_set: set[int] = set()
+    for chapter in existing_chapters:
+        if not isinstance(chapter, dict):
+            continue
+        try:
+            number = int(chapter.get("number"))
+        except Exception:
+            continue
+        if number > 0:
+            existing_numbers_set.add(number)
+    existing_numbers = sorted(existing_numbers_set)
+    existing_ranges = _format_chapter_number_ranges(existing_numbers)
+    neighbor_context = _build_missing_neighbor_context(existing_chapters, missing_numbers)
     style_samples = _outline_fill_style_samples(existing_chapters)
     system = (
         "你是严谨的长篇大纲补全器。"
@@ -579,13 +1519,548 @@ def _build_outline_missing_chapters_prompts(
     user = (
         f"目标总章数：{target_chapter_count}\n"
         f"缺失章号：{_format_chapter_number_ranges(missing_numbers)}\n"
+        f"缺失章号数组（严格按此输出）：{missing_numbers_json}\n"
+        f"已完成章号（禁止输出）：{existing_ranges or '（空）'}\n"
         f"已有章节（仅供连续性参考，不可重写）：{json.dumps(compact, ensure_ascii=False)}\n"
+        f"缺失章节邻接上下文（prev/next，仅供衔接）：{neighbor_context}\n"
         f"风格参考样本（模仿细节密度与句式，不得复用剧情）：{style_samples}\n"
         f"整体梗概（节选）：{(outline_md or '')[:2500]}\n\n"
         "请只输出缺失章号对应的 chapters。\n"
+        "输出前自检：chapters.number 集合必须与缺失章号数组完全一致。\n"
         f"每章要求：title 简洁；{fill_detail_rule}"
     )
     return system, user
+
+
+def _outline_gap_repair_max_attempts(missing_count: int) -> int:
+    if missing_count <= 0:
+        return 1
+    estimated = missing_count * 2 + 2
+    return max(8, min(OUTLINE_FILL_MAX_TOTAL_ATTEMPTS, estimated))
+
+
+def _build_outline_gap_repair_prompts(
+    *,
+    target_chapter_count: int,
+    batch_missing: list[int],
+    existing_chapters: list[dict[str, object]],
+    outline_md: str,
+    attempt: int,
+    max_attempts: int,
+    previous_output_numbers: list[int] | None = None,
+    previous_failure_reason: str | None = None,
+) -> tuple[str, str]:
+    missing_sorted = sorted(set(int(n) for n in batch_missing if int(n) > 0))
+    missing_json = json.dumps(missing_sorted, ensure_ascii=False)
+    missing_ranges = _format_chapter_number_ranges(missing_sorted)
+    index_json = _build_outline_segment_chapter_index(existing_chapters)
+    neighbor_context = _build_missing_neighbor_context(existing_chapters, missing_sorted, max_items=12, max_chars=1800)
+    style_samples = _outline_fill_style_samples(existing_chapters)
+    detail_rule = _outline_fill_detail_rule(target_chapter_count=target_chapter_count, existing_chapters=existing_chapters)
+    feedback_block = ""
+    if attempt > 1:
+        prev_numbers_text = _format_chapter_number_ranges(previous_output_numbers or [])
+        if not prev_numbers_text:
+            prev_numbers_text = "（无可识别章号）"
+        reason = (previous_failure_reason or "上一轮未产生可采纳章节").strip()
+        feedback_block = (
+            "<LAST_ATTEMPT_FEEDBACK>\n"
+            f"上一轮失败原因：{reason}\n"
+            f"上一轮输出章号：{prev_numbers_text}\n"
+            "本轮必须只输出当前批次缺失章号数组。\n"
+            "</LAST_ATTEMPT_FEEDBACK>\n"
+        )
+
+    system = (
+        "你是长篇大纲终检补全器。"
+        "你必须只输出一个 JSON 对象，禁止任何解释、Markdown、代码块。"
+        '输出格式固定为：{"chapters":[{"number":int,"title":string,"beats":[string]}]}。'
+        "本轮只能输出要求章号，每个章号出现且仅出现一次。"
+        "禁止输出范围外章号、禁止输出空 beats、禁止占位词。"
+    )
+    user = (
+        f"目标总章数：{target_chapter_count}\n"
+        f"本轮缺失章号：{missing_ranges}\n"
+        f"本轮缺失章号数组（严格按此输出）：{missing_json}\n"
+        f"全量章节索引（不可改写）：{index_json}\n"
+        f"缺失章节邻接上下文（prev/next）：{neighbor_context}\n"
+        f"风格参考样本：{style_samples}\n"
+        f"整体梗概（节选）：{(outline_md or '')[:2400]}\n"
+        f"当前尝试：第 {attempt}/{max_attempts} 轮\n"
+        f"{feedback_block}"
+        "输出前自检：chapters.number 集合必须与本轮缺失章号数组完全一致。\n"
+        f"每章要求：title 简洁；{detail_rule}"
+    )
+    return system, user
+
+
+def _repair_outline_remaining_gaps_with_llm(
+    *,
+    data: dict[str, object],
+    target_chapter_count: int | None,
+    request_id: str,
+    actor_user_id: str,
+    project_id: str,
+    api_key: str,
+    llm_call,
+    run_params_extra_json: dict[str, object] | None,
+    progress_hook: OutlineFillProgressHook | None = None,
+) -> tuple[dict[str, object], list[str], list[str]]:
+    if not target_chapter_count or target_chapter_count <= 0:
+        return data, [], []
+    chapters_now, normalize_warnings = _normalize_outline_chapters(data.get("chapters"))
+    if not chapters_now:
+        return data, normalize_warnings, []
+
+    missing_numbers = _collect_missing_chapter_numbers(chapters_now, target_chapter_count=target_chapter_count)
+    if not missing_numbers:
+        return data, [], []
+
+    warnings: list[str] = list(normalize_warnings)
+    run_ids: list[str] = []
+    if len(missing_numbers) > OUTLINE_GAP_REPAIR_MAX_MISSING:
+        warnings.append("outline_gap_repair_skipped_too_many_missing")
+        return data, _dedupe_warnings(warnings), run_ids
+
+    max_attempts = _outline_gap_repair_max_attempts(len(missing_numbers))
+    contract = contract_for_task("outline_generate")
+    attempt = 0
+    stagnant_rounds = 0
+    last_failure_reason: str | None = None
+    last_output_numbers: list[int] | None = None
+
+    if progress_hook is not None:
+        progress_hook(
+            {
+                "event": "gap_repair_start",
+                "attempt": 0,
+                "max_attempts": max_attempts,
+                "remaining_count": len(missing_numbers),
+            }
+        )
+
+    while attempt < max_attempts:
+        missing_numbers = _collect_missing_chapter_numbers(chapters_now, target_chapter_count=target_chapter_count)
+        if not missing_numbers:
+            break
+        attempt += 1
+        batch_missing = missing_numbers[: OUTLINE_GAP_REPAIR_BATCH_SIZE]
+        if progress_hook is not None:
+            progress_hook(
+                {
+                    "event": "gap_repair_attempt_start",
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "batch_size": len(batch_missing),
+                    "remaining_count": len(missing_numbers),
+                    "range": _format_chapter_number_ranges(batch_missing),
+                }
+            )
+
+        repair_system, repair_user = _build_outline_gap_repair_prompts(
+            target_chapter_count=target_chapter_count,
+            batch_missing=batch_missing,
+            existing_chapters=chapters_now,
+            outline_md=str(data.get("outline_md") or ""),
+            attempt=attempt,
+            max_attempts=max_attempts,
+            previous_output_numbers=last_output_numbers,
+            previous_failure_reason=last_failure_reason,
+        )
+
+        current_max_tokens = llm_call.params.get("max_tokens")
+        current_max_tokens_int = int(current_max_tokens) if isinstance(current_max_tokens, int) else None
+        repair_max_tokens = _recommend_outline_segment_max_tokens(
+            requested_count=len(batch_missing),
+            provider=llm_call.provider,
+            model=llm_call.model,
+            current_max_tokens=current_max_tokens_int,
+        )
+        repair_call = with_param_overrides(llm_call, {"max_tokens": repair_max_tokens}) if repair_max_tokens else llm_call
+        repair_extra = dict(run_params_extra_json or {})
+        repair_extra["outline_gap_repair"] = {
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+            "target_chapter_count": target_chapter_count,
+            "batch_missing": batch_missing,
+        }
+        try:
+            repaired = call_llm_and_record(
+                logger=logger,
+                request_id=request_id,
+                actor_user_id=actor_user_id,
+                project_id=project_id,
+                chapter_id=None,
+                run_type="outline_gap_repair",
+                api_key=api_key,
+                prompt_system=repair_system,
+                prompt_user=repair_user,
+                llm_call=repair_call,
+                run_params_extra_json=repair_extra,
+            )
+        except AppError as exc:
+            warnings.append("outline_gap_repair_call_failed")
+            if exc.code == "LLM_TIMEOUT":
+                warnings.append("outline_gap_repair_timeout")
+            last_failure_reason = f"模型调用失败（{exc.code}）"
+            last_output_numbers = None
+            stagnant_rounds += 1
+            if progress_hook is not None:
+                progress_hook(
+                    {
+                        "event": "gap_repair_call_failed",
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "remaining_count": len(missing_numbers),
+                    }
+                )
+            if stagnant_rounds >= OUTLINE_GAP_REPAIR_STAGNANT_LIMIT:
+                break
+            continue
+
+        run_ids.append(repaired.run_id)
+        raw_preview = _build_outline_stream_raw_preview(repaired.text)
+        raw_chars = len(repaired.text or "")
+        repaired_parsed = contract.parse(repaired.text, finish_reason=repaired.finish_reason)
+        repaired_data, repaired_warnings, repaired_error = (
+            repaired_parsed.data,
+            repaired_parsed.warnings,
+            repaired_parsed.parse_error,
+        )
+        warnings.extend(repaired_warnings)
+        if repaired_error is not None:
+            warnings.append("outline_gap_repair_parse_failed")
+            last_failure_reason = str(repaired_error.get("message") or "输出解析失败")
+            last_output_numbers = None
+            stagnant_rounds += 1
+            if progress_hook is not None:
+                progress_hook(
+                    {
+                        "event": "gap_repair_parse_failed",
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "remaining_count": len(missing_numbers),
+                        "raw_output_preview": raw_preview,
+                        "raw_output_chars": raw_chars,
+                    }
+                )
+            if stagnant_rounds >= OUTLINE_GAP_REPAIR_STAGNANT_LIMIT:
+                break
+            continue
+
+        incoming, incoming_warnings = _normalize_outline_chapters(repaired_data.get("chapters"))
+        warnings.extend(incoming_warnings)
+        incoming_numbers = _extract_outline_chapter_numbers(incoming, limit=120)
+        if not incoming:
+            warnings.append("outline_gap_repair_empty")
+            last_failure_reason = "未输出可识别章节"
+            last_output_numbers = incoming_numbers
+            stagnant_rounds += 1
+            if stagnant_rounds >= OUTLINE_GAP_REPAIR_STAGNANT_LIMIT:
+                break
+            continue
+
+        accepted = 0
+        accepted_numbers: list[int] = []
+        allowed = set(batch_missing)
+        by_number = {int(c["number"]): c for c in chapters_now if int(c["number"]) <= target_chapter_count}
+        for chapter in incoming:
+            number = int(chapter["number"])
+            if number not in allowed:
+                continue
+            previous = by_number.get(number)
+            if previous is None:
+                by_number[number] = chapter
+                accepted += 1
+                accepted_numbers.append(number)
+                continue
+            if _chapter_score(chapter) > _chapter_score(previous):
+                by_number[number] = chapter
+
+        if accepted <= 0:
+            warnings.append("outline_gap_repair_no_progress")
+            last_output_numbers = incoming_numbers
+            if incoming_numbers:
+                last_failure_reason = "输出章号与缺失章号不一致"
+            else:
+                last_failure_reason = "未输出可采纳章节"
+            stagnant_rounds += 1
+            if progress_hook is not None:
+                progress_hook(
+                    {
+                        "event": "gap_repair_no_progress",
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "remaining_count": len(missing_numbers),
+                        "raw_output_preview": raw_preview,
+                        "raw_output_chars": raw_chars,
+                        "incoming_numbers_text": _format_chapter_number_ranges(incoming_numbers),
+                    }
+                )
+            if stagnant_rounds >= OUTLINE_GAP_REPAIR_STAGNANT_LIMIT:
+                break
+            continue
+
+        warnings.append("outline_gap_repair_applied")
+        stagnant_rounds = 0
+        last_failure_reason = None
+        last_output_numbers = None
+        chapters_now = [by_number[n] for n in sorted(by_number.keys())]
+        remaining = len(_collect_missing_chapter_numbers(chapters_now, target_chapter_count=target_chapter_count))
+        if progress_hook is not None:
+            progress_hook(
+                {
+                    "event": "gap_repair_applied",
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "accepted": accepted,
+                    "accepted_numbers": accepted_numbers,
+                    "chapters_snapshot": _clone_outline_chapters(chapters_now),
+                    "chapter_count": len(chapters_now),
+                    "remaining_count": remaining,
+                    "raw_output_preview": raw_preview,
+                    "raw_output_chars": raw_chars,
+                }
+            )
+
+    data["chapters"] = chapters_now
+    data, coverage_warnings = _enforce_outline_chapter_coverage(data=data, target_chapter_count=target_chapter_count)
+    warnings.extend(coverage_warnings)
+    coverage = data.get("chapter_coverage")
+    remaining_count = int(coverage.get("missing_count") or 0) if isinstance(coverage, dict) else 0
+    if remaining_count > 0:
+        warnings.append("outline_gap_repair_remaining")
+        chapters_now, final_warnings, final_run_ids = _repair_outline_remaining_gaps_final_sweep_with_llm(
+            chapters_now=chapters_now,
+            outline_md=str(data.get("outline_md") or ""),
+            target_chapter_count=target_chapter_count,
+            request_id=request_id,
+            actor_user_id=actor_user_id,
+            project_id=project_id,
+            api_key=api_key,
+            llm_call=llm_call,
+            run_params_extra_json=run_params_extra_json,
+            progress_hook=progress_hook,
+        )
+        warnings.extend(final_warnings)
+        for run_id in final_run_ids:
+            if run_id not in run_ids:
+                run_ids.append(run_id)
+        data["chapters"] = chapters_now
+        data, final_coverage_warnings = _enforce_outline_chapter_coverage(
+            data=data, target_chapter_count=target_chapter_count
+        )
+        warnings.extend(final_coverage_warnings)
+        coverage = data.get("chapter_coverage")
+        remaining_count = int(coverage.get("missing_count") or 0) if isinstance(coverage, dict) else 0
+        if remaining_count > 0:
+            warnings.append("outline_gap_repair_final_sweep_remaining")
+        else:
+            warnings.extend(["outline_gap_repair_final_sweep_resolved", "outline_gap_repair_resolved"])
+    else:
+        warnings.append("outline_gap_repair_resolved")
+
+    if progress_hook is not None:
+        progress_hook(
+            {
+                "event": "gap_repair_done",
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "remaining_count": remaining_count,
+            }
+        )
+    return data, _dedupe_warnings(warnings), run_ids
+
+
+def _repair_outline_remaining_gaps_final_sweep_with_llm(
+    *,
+    chapters_now: list[dict[str, object]],
+    outline_md: str,
+    target_chapter_count: int,
+    request_id: str,
+    actor_user_id: str,
+    project_id: str,
+    api_key: str,
+    llm_call,
+    run_params_extra_json: dict[str, object] | None,
+    progress_hook: OutlineFillProgressHook | None = None,
+) -> tuple[list[dict[str, object]], list[str], list[str]]:
+    warnings: list[str] = []
+    run_ids: list[str] = []
+    missing_numbers = _collect_missing_chapter_numbers(chapters_now, target_chapter_count=target_chapter_count)
+    if not missing_numbers:
+        return chapters_now, warnings, run_ids
+    if len(missing_numbers) > OUTLINE_GAP_REPAIR_FINAL_SWEEP_MAX_MISSING:
+        warnings.append("outline_gap_repair_final_sweep_skipped_too_many_missing")
+        return chapters_now, warnings, run_ids
+
+    warnings.append("outline_gap_repair_final_sweep_started")
+    max_attempts = OUTLINE_GAP_REPAIR_FINAL_SWEEP_ATTEMPTS_PER_CHAPTER
+    contract = contract_for_task("outline_generate")
+    if progress_hook is not None:
+        progress_hook(
+            {
+                "event": "gap_repair_final_sweep_start",
+                "attempt": 0,
+                "max_attempts": max_attempts,
+                "remaining_count": len(missing_numbers),
+            }
+        )
+
+    for number in list(missing_numbers):
+        chapter_fixed = False
+        last_failure_reason: str | None = None
+        last_output_numbers: list[int] | None = None
+        for attempt in range(1, max_attempts + 1):
+            remaining_before = len(_collect_missing_chapter_numbers(chapters_now, target_chapter_count=target_chapter_count))
+            if progress_hook is not None:
+                progress_hook(
+                    {
+                        "event": "gap_repair_final_sweep_attempt_start",
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "remaining_count": remaining_before,
+                        "range": str(number),
+                    }
+                )
+
+            repair_system, repair_user = _build_outline_gap_repair_prompts(
+                target_chapter_count=target_chapter_count,
+                batch_missing=[number],
+                existing_chapters=chapters_now,
+                outline_md=outline_md,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                previous_output_numbers=last_output_numbers,
+                previous_failure_reason=last_failure_reason,
+            )
+            current_max_tokens = llm_call.params.get("max_tokens")
+            current_max_tokens_int = int(current_max_tokens) if isinstance(current_max_tokens, int) else None
+            repair_max_tokens = _recommend_outline_segment_max_tokens(
+                requested_count=1,
+                provider=llm_call.provider,
+                model=llm_call.model,
+                current_max_tokens=current_max_tokens_int,
+            )
+            repair_call = with_param_overrides(llm_call, {"max_tokens": repair_max_tokens}) if repair_max_tokens else llm_call
+            repair_extra = dict(run_params_extra_json or {})
+            repair_extra["outline_gap_repair_final_sweep"] = {
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "target_chapter_count": target_chapter_count,
+                "chapter_number": number,
+            }
+            try:
+                repaired = call_llm_and_record(
+                    logger=logger,
+                    request_id=request_id,
+                    actor_user_id=actor_user_id,
+                    project_id=project_id,
+                    chapter_id=None,
+                    run_type="outline_gap_repair_final_sweep",
+                    api_key=api_key,
+                    prompt_system=repair_system,
+                    prompt_user=repair_user,
+                    llm_call=repair_call,
+                    run_params_extra_json=repair_extra,
+                )
+            except AppError as exc:
+                warnings.append("outline_gap_repair_final_sweep_call_failed")
+                if exc.code == "LLM_TIMEOUT":
+                    warnings.append("outline_gap_repair_final_sweep_timeout")
+                last_failure_reason = f"模型调用失败（{exc.code}）"
+                last_output_numbers = None
+                continue
+
+            run_ids.append(repaired.run_id)
+            raw_preview = _build_outline_stream_raw_preview(repaired.text)
+            raw_chars = len(repaired.text or "")
+            repaired_parsed = contract.parse(repaired.text, finish_reason=repaired.finish_reason)
+            repaired_data, repaired_warnings, repaired_error = (
+                repaired_parsed.data,
+                repaired_parsed.warnings,
+                repaired_parsed.parse_error,
+            )
+            warnings.extend(repaired_warnings)
+            if repaired_error is not None:
+                warnings.append("outline_gap_repair_final_sweep_parse_failed")
+                last_failure_reason = str(repaired_error.get("message") or "输出解析失败")
+                last_output_numbers = None
+                continue
+
+            incoming, incoming_warnings = _normalize_outline_chapters(repaired_data.get("chapters"))
+            warnings.extend(incoming_warnings)
+            incoming_numbers = _extract_outline_chapter_numbers(incoming, limit=120)
+            if not incoming:
+                warnings.append("outline_gap_repair_final_sweep_empty")
+                last_failure_reason = "未输出可识别章节"
+                last_output_numbers = incoming_numbers
+                continue
+
+            by_number = {int(c["number"]): c for c in chapters_now if int(c["number"]) <= target_chapter_count}
+            accepted = 0
+            accepted_numbers: list[int] = []
+            for chapter in incoming:
+                chapter_number = int(chapter["number"])
+                if chapter_number != number:
+                    continue
+                previous = by_number.get(chapter_number)
+                if previous is None:
+                    by_number[chapter_number] = chapter
+                    accepted += 1
+                    accepted_numbers.append(chapter_number)
+                    continue
+                if _chapter_score(chapter) > _chapter_score(previous):
+                    by_number[chapter_number] = chapter
+
+            if accepted <= 0:
+                warnings.append("outline_gap_repair_final_sweep_no_progress")
+                if incoming_numbers:
+                    last_failure_reason = "输出章号与目标章号不一致"
+                else:
+                    last_failure_reason = "未输出可采纳章节"
+                last_output_numbers = incoming_numbers
+                continue
+
+            warnings.append("outline_gap_repair_final_sweep_applied")
+            last_failure_reason = None
+            last_output_numbers = None
+            chapters_now = [by_number[n] for n in sorted(by_number.keys())]
+            chapter_fixed = True
+            remaining_after = len(
+                _collect_missing_chapter_numbers(chapters_now, target_chapter_count=target_chapter_count)
+            )
+            if progress_hook is not None:
+                progress_hook(
+                    {
+                        "event": "gap_repair_final_sweep_applied",
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "accepted": accepted,
+                        "accepted_numbers": accepted_numbers,
+                        "chapters_snapshot": _clone_outline_chapters(chapters_now),
+                        "chapter_count": len(chapters_now),
+                        "remaining_count": remaining_after,
+                        "raw_output_preview": raw_preview,
+                        "raw_output_chars": raw_chars,
+                    }
+                )
+            break
+
+        if not chapter_fixed:
+            warnings.append("outline_gap_repair_final_sweep_chapter_unresolved")
+
+    remaining_final = len(_collect_missing_chapter_numbers(chapters_now, target_chapter_count=target_chapter_count))
+    if progress_hook is not None:
+        progress_hook(
+            {
+                "event": "gap_repair_final_sweep_done",
+                "attempt": max_attempts,
+                "max_attempts": max_attempts,
+                "remaining_count": remaining_final,
+            }
+        )
+    return chapters_now, _dedupe_warnings(warnings), run_ids
 
 
 def _fill_outline_missing_chapters_with_llm(
@@ -696,6 +2171,8 @@ def _fill_outline_missing_chapters_with_llm(
                 break
             continue
         continue_run_ids.append(filled.run_id)
+        fill_raw_preview = _build_outline_stream_raw_preview(filled.text)
+        fill_raw_chars = len(filled.text or "")
         filled_parsed = contract.parse(filled.text, finish_reason=filled.finish_reason)
         filled_data, filled_warnings, filled_error = filled_parsed.data, filled_parsed.warnings, filled_parsed.parse_error
         warnings.extend(filled_warnings)
@@ -711,6 +2188,8 @@ def _fill_outline_missing_chapters_with_llm(
                         "attempt": attempt,
                         "max_attempts": max_attempts,
                         "remaining_count": len(missing_numbers),
+                        "raw_output_preview": fill_raw_preview,
+                        "raw_output_chars": fill_raw_chars,
                     }
                 )
             if stagnant_rounds >= OUTLINE_FILL_STAGNANT_ROUNDS_LIMIT:
@@ -784,6 +2263,8 @@ def _fill_outline_missing_chapters_with_llm(
                     "chapters_snapshot": chapter_snapshot,
                     "chapter_count": len(chapter_snapshot),
                     "remaining_count": remaining,
+                    "raw_output_preview": fill_raw_preview,
+                    "raw_output_chars": fill_raw_chars,
                 }
             )
 
@@ -791,12 +2272,35 @@ def _fill_outline_missing_chapters_with_llm(
     data, coverage_warnings = _enforce_outline_chapter_coverage(data=data, target_chapter_count=target_chapter_count)
     warnings.extend(coverage_warnings)
     coverage = data.get("chapter_coverage")
-    if isinstance(coverage, dict):
-        remaining_count = int(coverage.get("missing_count") or 0)
-        if remaining_count > 0:
-            warnings.append("outline_fill_missing_remaining")
-    else:
-        remaining_count = 0
+    remaining_count = int(coverage.get("missing_count") or 0) if isinstance(coverage, dict) else 0
+
+    gap_repair_run_ids: list[str] = []
+    if remaining_count > 0:
+        repaired_data, repair_warnings, repair_run_ids = _repair_outline_remaining_gaps_with_llm(
+            data=data,
+            target_chapter_count=target_chapter_count,
+            request_id=request_id,
+            actor_user_id=actor_user_id,
+            project_id=project_id,
+            api_key=api_key,
+            llm_call=llm_call,
+            run_params_extra_json=run_params_extra_json,
+            progress_hook=progress_hook,
+        )
+        data = repaired_data
+        warnings.extend(repair_warnings)
+        gap_repair_run_ids = repair_run_ids
+        for run_id in repair_run_ids:
+            if run_id not in continue_run_ids:
+                continue_run_ids.append(run_id)
+
+    coverage = data.get("chapter_coverage")
+    remaining_count = int(coverage.get("missing_count") or 0) if isinstance(coverage, dict) else 0
+    if remaining_count > 0:
+        warnings.append("outline_fill_missing_remaining")
+    if gap_repair_run_ids and isinstance(coverage, dict):
+        coverage["gap_repair_run_ids"] = gap_repair_run_ids
+        data["chapter_coverage"] = coverage
     if progress_hook is not None:
         progress_hook(
             {
@@ -904,6 +2408,60 @@ def generate_outline(
 
     if prepared is None:
         raise AppError(code="INTERNAL_ERROR", message="LLM 调用准备失败", status_code=500)
+
+    if _should_use_outline_segmented_mode(prepared.target_chapter_count):
+        assert prepared.target_chapter_count is not None
+        segmented = _generate_outline_segmented_with_llm(
+            request_id=request_id,
+            actor_user_id=user_id,
+            project_id=project_id,
+            api_key=str(prepared.resolved_api_key),
+            llm_call=prepared.llm_call,
+            prompt_system=prepared.prompt_system,
+            prompt_user=prepared.prompt_user,
+            target_chapter_count=prepared.target_chapter_count,
+            run_params_extra_json=prepared.run_params_extra_json,
+        )
+        aggregate_params_json = build_run_params_json(
+            params_json=prepared.llm_call.params_json,
+            memory_retrieval_log_json=None,
+            extra_json=prepared.run_params_extra_json,
+        )
+        aggregate_run_id = _write_outline_segmented_aggregate_run(
+            request_id=request_id,
+            actor_user_id=user_id,
+            project_id=project_id,
+            run_type="outline_segmented",
+            llm_call=prepared.llm_call,
+            prompt_system=prepared.prompt_system,
+            prompt_user=prepared.prompt_user,
+            prompt_render_log_json=prepared.prompt_render_log_json,
+            run_params_json=aggregate_params_json,
+            data=segmented.data,
+            warnings=segmented.warnings,
+            parse_error=segmented.parse_error,
+            segmented_run_ids=segmented.run_ids,
+            meta=segmented.meta,
+        )
+        data = dict(segmented.data)
+        warnings = _dedupe_warnings(segmented.warnings)
+        if warnings:
+            data["warnings"] = warnings
+        if segmented.parse_error is not None:
+            data["parse_error"] = segmented.parse_error
+        data["generation_run_id"] = aggregate_run_id
+        if segmented.run_ids:
+            data["generation_sub_run_ids"] = segmented.run_ids
+            data["generation_run_ids"] = [aggregate_run_id, *segmented.run_ids]
+        if segmented.latency_ms > 0:
+            data["latency_ms"] = segmented.latency_ms
+        if segmented.dropped_params:
+            data["dropped_params"] = segmented.dropped_params
+        if segmented.finish_reasons:
+            data["finish_reason"] = segmented.finish_reasons[-1]
+            data["finish_reasons"] = segmented.finish_reasons
+        data["segmented_generation"] = segmented.meta
+        return ok_payload(request_id=request_id, data=data)
 
     llm_result = call_llm_and_record(
         logger=logger,
@@ -1070,6 +2628,151 @@ def generate_outline_stream(
                 extra_json=run_params_extra_json,
             )
 
+        if _should_use_outline_segmented_mode(target_chapter_count):
+            if target_chapter_count is None:
+                yield sse_error(error="长篇分段模式参数异常", code=500)
+                yield sse_done()
+                return
+            yield sse_progress(message="长篇模式：分段生成中...", progress=10)
+            segment_progress_lock = threading.Lock()
+            segment_progress_events: list[dict[str, object]] = []
+
+            def _on_segment_progress(update: dict[str, object]) -> None:
+                if not isinstance(update, dict):
+                    return
+                with segment_progress_lock:
+                    segment_progress_events.append(dict(update))
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    _generate_outline_segmented_with_llm,
+                    request_id=request_id,
+                    actor_user_id=user_id,
+                    project_id=project_id,
+                    api_key=str(resolved_api_key),
+                    llm_call=llm_call,
+                    prompt_system=prompt_system,
+                    prompt_user=prompt_user,
+                    target_chapter_count=target_chapter_count,
+                    run_params_extra_json=run_params_extra_json,
+                    progress_hook=_on_segment_progress,
+                )
+
+                last_ping = 0.0
+                last_message = ""
+                last_snapshot_key: tuple[str, int, int, int] | None = None
+                last_raw_preview_key: tuple[str, int, int, int] | None = None
+                while True:
+                    now = time.monotonic()
+                    if now - last_ping >= OUTLINE_FILL_HEARTBEAT_INTERVAL_SECONDS:
+                        yield sse_heartbeat()
+                        last_ping = now
+                    with segment_progress_lock:
+                        pending_snapshots = list(segment_progress_events)
+                        segment_progress_events.clear()
+                    for snapshot in pending_snapshots:
+                        event_name = str(snapshot.get("event") or "")
+                        batch_idx = int(snapshot.get("batch_index") or 0)
+                        attempt = int(snapshot.get("attempt") or 0)
+                        completed_count = int(snapshot.get("completed_count") or 0)
+                        snapshot_chapters = snapshot.get("chapters_snapshot")
+                        snapshot_outline_md = str(snapshot.get("outline_md") or "")
+                        if event_name in (
+                            "batch_applied",
+                            "fill_attempt_applied",
+                            "fill_gap_repair_applied",
+                            "fill_gap_repair_final_sweep_applied",
+                        ) and isinstance(
+                            snapshot_chapters, list
+                        ):
+                            snapshot_key = (event_name, batch_idx, attempt, completed_count)
+                            if snapshot_key != last_snapshot_key:
+                                yield sse_result({"outline_md": snapshot_outline_md, "chapters": snapshot_chapters})
+                                last_snapshot_key = snapshot_key
+                        raw_preview = str(snapshot.get("raw_output_preview") or "").strip()
+                        raw_chars_raw = snapshot.get("raw_output_chars")
+                        try:
+                            raw_chars = int(raw_chars_raw) if raw_chars_raw is not None else len(raw_preview)
+                        except Exception:
+                            raw_chars = len(raw_preview)
+                        if raw_preview:
+                            raw_key = (event_name, batch_idx, attempt, raw_chars)
+                            if raw_key != last_raw_preview_key:
+                                batch_count_raw = snapshot.get("batch_count")
+                                try:
+                                    batch_count = int(batch_count_raw) if batch_count_raw is not None else 0
+                                except Exception:
+                                    batch_count = 0
+                                title_parts = [event_name or "segment"]
+                                if batch_idx > 0 and batch_count > 0:
+                                    title_parts.append(f"batch {batch_idx}/{batch_count}")
+                                elif batch_idx > 0:
+                                    title_parts.append(f"batch {batch_idx}")
+                                if attempt > 0:
+                                    title_parts.append(f"attempt {attempt}")
+                                title = " | ".join(title_parts)
+                                yield sse_chunk(f"\n\n[{title}]\n{raw_preview}\n")
+                                last_raw_preview_key = raw_key
+                        progress_percent = snapshot.get("progress_percent")
+                        if isinstance(progress_percent, int):
+                            progress_num = max(10, min(98, progress_percent))
+                        else:
+                            progress_num = 10
+                        message = _outline_segment_progress_message(snapshot)
+                        if message != last_message:
+                            yield sse_progress(message=message, progress=progress_num)
+                            last_message = message
+                    if future.done():
+                        break
+                    time.sleep(OUTLINE_FILL_POLL_INTERVAL_SECONDS)
+
+                segmented = future.result()
+
+            aggregate_run_id = _write_outline_segmented_aggregate_run(
+                request_id=request_id,
+                actor_user_id=user_id,
+                project_id=project_id,
+                run_type="outline_stream_segmented",
+                llm_call=llm_call,
+                prompt_system=prompt_system,
+                prompt_user=prompt_user,
+                prompt_render_log_json=prompt_render_log_json,
+                run_params_json=run_params_json,
+                data=segmented.data,
+                warnings=segmented.warnings,
+                parse_error=segmented.parse_error,
+                segmented_run_ids=segmented.run_ids,
+                meta=segmented.meta,
+            )
+            data = dict(segmented.data)
+            warnings = _dedupe_warnings(segmented.warnings)
+            if warnings:
+                data["warnings"] = warnings
+            if segmented.parse_error is not None:
+                data["parse_error"] = segmented.parse_error
+            data["generation_run_id"] = aggregate_run_id
+            if segmented.run_ids:
+                data["generation_sub_run_ids"] = segmented.run_ids
+                data["generation_run_ids"] = [aggregate_run_id, *segmented.run_ids]
+            if segmented.latency_ms > 0:
+                data["latency_ms"] = segmented.latency_ms
+            if segmented.dropped_params:
+                data["dropped_params"] = segmented.dropped_params
+            if segmented.finish_reasons:
+                data["finish_reason"] = segmented.finish_reasons[-1]
+                data["finish_reasons"] = segmented.finish_reasons
+            data["segmented_generation"] = segmented.meta
+
+            result_data = dict(data)
+            result_data.pop("raw_output", None)
+            result_data.pop("raw_json", None)
+            result_data.pop("fixed_json", None)
+
+            yield sse_progress(message="完成", progress=100, status="success")
+            yield sse_result(result_data)
+            yield sse_done()
+            return
+
         yield sse_progress(message="调用模型...", progress=10)
 
         raw_output = ""
@@ -1207,13 +2910,13 @@ def generate_outline_stream(
                 if target_chapter_count:
                     yield sse_progress(message="补全缺失章节...", progress=94)
                 fill_progress_lock = threading.Lock()
-                fill_progress: dict[str, object] = {}
+                fill_progress_events: list[dict[str, object]] = []
 
                 def _on_fill_progress(update: dict[str, object]) -> None:
                     if not isinstance(update, dict):
                         return
                     with fill_progress_lock:
-                        fill_progress.update(update)
+                        fill_progress_events.append(dict(update))
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                     fill_future = executor.submit(
@@ -1231,13 +2934,16 @@ def generate_outline_stream(
 
                     last_ping = 0.0
                     last_message = ""
-                    last_snapshot_attempt = -1
-                    while not fill_future.done():
+                    last_snapshot_marker: tuple[str, int] | None = None
+                    while True:
                         now = time.monotonic()
                         if now - last_ping >= OUTLINE_FILL_HEARTBEAT_INTERVAL_SECONDS:
                             yield sse_heartbeat()
-                            with fill_progress_lock:
-                                snapshot = dict(fill_progress)
+                            last_ping = now
+                        with fill_progress_lock:
+                            pending_fill_snapshots = list(fill_progress_events)
+                            fill_progress_events.clear()
+                        for snapshot in pending_fill_snapshots:
                             snapshot_event = str(snapshot.get("event") or "")
                             snapshot_attempt_raw = snapshot.get("attempt")
                             if isinstance(snapshot_attempt_raw, int):
@@ -1248,18 +2954,24 @@ def generate_outline_stream(
                                 except Exception:
                                     snapshot_attempt = 0
                             snapshot_chapters = snapshot.get("chapters_snapshot")
+                            snapshot_marker = (snapshot_event, snapshot_attempt)
                             if (
-                                snapshot_event == "attempt_applied"
-                                and snapshot_attempt > last_snapshot_attempt
+                                snapshot_event in (
+                                    "attempt_applied",
+                                    "gap_repair_applied",
+                                    "gap_repair_final_sweep_applied",
+                                )
+                                and snapshot_marker != last_snapshot_marker
                                 and isinstance(snapshot_chapters, list)
                             ):
                                 yield sse_result({"outline_md": preview_outline_md, "chapters": snapshot_chapters})
-                                last_snapshot_attempt = snapshot_attempt
+                                last_snapshot_marker = snapshot_marker
                             message = _outline_fill_progress_message(snapshot)
                             if message != last_message:
                                 yield sse_progress(message=message, progress=94)
                                 last_message = message
-                            last_ping = now
+                        if fill_future.done():
+                            break
                         time.sleep(OUTLINE_FILL_POLL_INTERVAL_SECONDS)
 
                     data, fill_warnings, fill_run_ids = fill_future.result()
