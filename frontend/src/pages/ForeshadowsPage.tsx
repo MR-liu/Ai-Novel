@@ -5,9 +5,10 @@ import { DebugDetails, DebugPageShell } from "../components/atelier/DebugPageShe
 import { useConfirm } from "../components/ui/confirm";
 import { useToast } from "../components/ui/toast";
 import { RequestIdBadge } from "../components/ui/RequestIdBadge";
+import { useChapterMetaList } from "../hooks/useChapterMetaList";
 import { createRequestSeqGuard } from "../lib/requestSeqGuard";
 import { ApiError, apiJson } from "../services/apiClient";
-import type { Chapter } from "../types";
+import type { ChapterListItem } from "../types";
 
 type ForeshadowOpenLoop = {
   id: string;
@@ -30,7 +31,7 @@ const OPEN_LOOPS_LIMIT_INITIAL = 80;
 const OPEN_LOOPS_LIMIT_STEP = 80;
 const OPEN_LOOPS_LIMIT_MAX = 200;
 
-function labelForChapter(chapter: Chapter): string {
+function labelForChapter(chapter: ChapterListItem): string {
   const title = String(chapter.title || "").trim();
   return title ? `第${chapter.number}章：${title}` : `第${chapter.number}章`;
 }
@@ -55,35 +56,12 @@ export function ForeshadowsPage() {
   const [queryText, setQueryText] = useState("");
   const [order, setOrder] = useState<OrderKey>("timeline_desc");
 
-  const [chapters, setChapters] = useState<Chapter[]>([]);
-  const [loadingChapters, setLoadingChapters] = useState(false);
   const [resolvedAtChapterId, setResolvedAtChapterId] = useState<string>("");
 
   const listGuard = useMemo(() => createRequestSeqGuard(), []);
-  const chaptersGuard = useMemo(() => createRequestSeqGuard(), []);
-
-  const fetchChapters = useCallback(async () => {
-    if (!projectId) return;
-    const seq = chaptersGuard.next();
-    setLoadingChapters(true);
-    try {
-      const res = await apiJson<{ chapters: Chapter[] }>(`/api/projects/${projectId}/chapters`);
-      if (!chaptersGuard.isLatest(seq)) return;
-      setChapters(res.data.chapters ?? []);
-    } catch (e) {
-      if (!chaptersGuard.isLatest(seq)) return;
-      const err =
-        e instanceof ApiError
-          ? e
-          : new ApiError({ code: "UNKNOWN", message: String(e), requestId: "unknown", status: 0 });
-      setRequestId((prev) => prev ?? err.requestId ?? null);
-      toast.toastError(`${err.message} (${err.code})`, err.requestId);
-    } finally {
-      if (chaptersGuard.isLatest(seq)) {
-        setLoadingChapters(false);
-      }
-    }
-  }, [chaptersGuard, projectId, toast]);
+  const chapterListQuery = useChapterMetaList(projectId);
+  const chapters = chapterListQuery.chapters as ChapterListItem[];
+  const loadingChapters = !chapterListQuery.hasLoaded && chapterListQuery.loading;
 
   const fetchOpenLoops = useCallback(async () => {
     if (!projectId) return;
@@ -118,16 +96,10 @@ export function ForeshadowsPage() {
 
   useEffect(() => {
     const guard1 = listGuard;
-    const guard2 = chaptersGuard;
     return () => {
       guard1.invalidate();
-      guard2.invalidate();
     };
-  }, [chaptersGuard, listGuard]);
-
-  useEffect(() => {
-    void fetchChapters();
-  }, [fetchChapters]);
+  }, [listGuard]);
 
   useEffect(() => {
     void fetchOpenLoops();

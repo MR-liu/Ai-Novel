@@ -1,20 +1,19 @@
 import clsx from "clsx";
 import { BookOpen, ChevronLeft, Edit3, List, StickyNote } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import remarkGfm from "remark-gfm";
 
 import { ToolContent } from "../components/layout/AppShell";
+import { ChapterVirtualList } from "../components/writing/ChapterVirtualList";
 import { Drawer } from "../components/ui/Drawer";
-import { useProjectData } from "../hooks/useProjectData";
+import { useChapterDetail } from "../hooks/useChapterDetail";
+import { useChapterMetaList } from "../hooks/useChapterMetaList";
 import { ApiError, apiJson } from "../services/apiClient";
-import type { Chapter } from "../types";
+import { chapterStore } from "../services/chapterStore";
+import type { Chapter, ChapterListItem } from "../types";
 import type { MemoryContextPack } from "../components/writing/types";
-
-type PreviewLoaded = { chapters: Chapter[] };
-
-const EMPTY_CHAPTERS: Chapter[] = [];
 const EMPTY_PACK: MemoryContextPack = {
   worldbook: {},
   story_memory: {},
@@ -123,13 +122,10 @@ export function ChapterReaderPage() {
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [memoryError, setMemoryError] = useState<ApiError | null>(null);
   const [memoryPack, setMemoryPack] = useState<MemoryContextPack>(EMPTY_PACK);
+  const memoryCacheRef = useRef(new Map<string, MemoryContextPack>());
 
-  const previewQuery = useProjectData<PreviewLoaded>(projectId, async (id) => {
-    const res = await apiJson<{ chapters: Chapter[] }>(`/api/projects/${id}/chapters`);
-    return { chapters: res.data.chapters };
-  });
-
-  const chapters = previewQuery.data?.chapters ?? EMPTY_CHAPTERS;
+  const chapterListQuery = useChapterMetaList(projectId);
+  const chapters = chapterListQuery.chapters as ChapterListItem[];
   const sortedChapters = useMemo(() => [...chapters].sort((a, b) => (a.number ?? 0) - (b.number ?? 0)), [chapters]);
   const doneCount = useMemo(
     () => sortedChapters.reduce((acc, c) => acc + (c.status === "done" ? 1 : 0), 0),
@@ -153,7 +149,7 @@ export function ChapterReaderPage() {
     return visibleChapters.findIndex((c) => c.id === resolvedActiveId);
   }, [resolvedActiveId, visibleChapters]);
 
-  const activeChapter = useMemo(() => {
+  const activeChapterMeta = useMemo(() => {
     if (activeIndex < 0) return null;
     return visibleChapters[activeIndex] ?? null;
   }, [activeIndex, visibleChapters]);
@@ -178,6 +174,16 @@ export function ChapterReaderPage() {
     setActiveId(chapterId);
     setMobileListOpen(false);
   }, []);
+
+  const { chapter: activeChapter, loading: loadingChapter } = useChapterDetail(resolvedActiveId, {
+    enabled: Boolean(resolvedActiveId),
+  });
+  const activeChapterSummary = activeChapter ?? activeChapterMeta;
+
+  useEffect(() => {
+    if (prevChapter) void chapterStore.prefetchChapterDetail(prevChapter.id);
+    if (nextChapter) void chapterStore.prefetchChapterDetail(nextChapter.id);
+  }, [nextChapter, prevChapter]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -208,16 +214,23 @@ export function ChapterReaderPage() {
     if (!projectId) return;
     if (!activeChapter) return;
 
-    let cancelled = false;
-    void Promise.resolve().then(() => {
-      if (cancelled) return;
-      setMemoryLoading(true);
+    const cacheKey = `${activeChapter.id}:${activeChapter.updated_at}`;
+    const cachedPack = memoryCacheRef.current.get(cacheKey);
+    if (cachedPack) {
+      setMemoryPack(cachedPack);
       setMemoryError(null);
-    });
+      setMemoryLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setMemoryLoading(true);
+    setMemoryError(null);
     const queryText = buildMemoryQueryText(activeChapter);
 
     apiJson<MemoryContextPack>(`/api/projects/${projectId}/memory/preview`, {
       method: "POST",
+      signal: controller.signal,
       body: JSON.stringify({
         query_text: queryText,
         section_enabled: {
@@ -233,25 +246,28 @@ export function ChapterReaderPage() {
       }),
     })
       .then((res) => {
-        if (cancelled) return;
+        if (controller.signal.aborted) return;
+        memoryCacheRef.current.set(cacheKey, res.data);
         setMemoryPack(res.data);
+        setMemoryError(null);
       })
       .catch((e) => {
-        if (cancelled) return;
+        if (controller.signal.aborted) return;
         const err =
           e instanceof ApiError
             ? e
             : new ApiError({ code: "UNKNOWN", message: String(e), requestId: "unknown", status: 0 });
+        if (err.code === "REQUEST_ABORTED") return;
         setMemoryError(err);
         setMemoryPack(EMPTY_PACK);
       })
       .finally(() => {
-        if (cancelled) return;
+        if (controller.signal.aborted) return;
         setMemoryLoading(false);
       });
 
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [activeChapter, projectId]);
 
@@ -276,7 +292,7 @@ export function ChapterReaderPage() {
       <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
         <div className="inline-flex items-center gap-2 text-sm text-ink">
           <BookOpen size={16} />
-          章节
+          {"章节"}
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -287,44 +303,28 @@ export function ChapterReaderPage() {
             {onlyDone ? "显示全部" : "只看定稿"}
           </button>
           <span className="text-[11px] text-subtext">
-            {doneCount}/{sortedChapters.length} 已定稿
+            {doneCount}/{sortedChapters.length} {"已定稿"}
           </span>
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto p-2">
-        {sortedChapters.length === 0 ? (
-          <div className="p-3 text-sm text-subtext">暂无章节</div>
-        ) : onlyDone && visibleChapters.length === 0 ? (
-          <div className="p-3 text-sm text-subtext">暂无已定稿章节</div>
-        ) : null}
-        <div className="grid gap-1">
-          {visibleChapters.map((c) => {
-            const isActive = c.id === resolvedActiveId;
-            return (
-              <button
-                key={c.id}
-                className={clsx(
-                  "ui-focus-ring ui-transition-fast flex w-full items-center justify-between gap-2 rounded-atelier border px-3 py-2 text-left text-sm motion-safe:active:scale-[0.99]",
-                  isActive
-                    ? "border-accent/40 bg-accent/10 text-ink"
-                    : "border-border bg-canvas text-subtext hover:bg-surface",
-                )}
-                onClick={() => {
-                  openChapter(c.id);
-                }}
-                type="button"
-              >
-                <span className="min-w-0 truncate">
-                  {c.number}. {c.title?.trim() ? c.title : "（未命名）"}
-                </span>
-                <span className={clsx("shrink-0 text-[11px]", c.status === "done" ? "text-accent" : "text-subtext")}>
-                  {humanizeChapterStatusZh(c.status)}
-                </span>
-              </button>
-            );
-          })}
-        </div>
+      <div className="min-h-0 flex-1 p-2">
+        <ChapterVirtualList
+          chapters={visibleChapters}
+          activeId={resolvedActiveId}
+          ariaLabel="章节列表"
+          className="h-full"
+          emptyState={
+            sortedChapters.length === 0 ? (
+              <div className="p-3 text-sm text-subtext">{"暂无章节"}</div>
+            ) : (
+              <div className="p-3 text-sm text-subtext">{"暂无已定稿章节"}</div>
+            )
+          }
+          getStatusLabel={(chapter) => humanizeChapterStatusZh(chapter.status)}
+          onSelectChapter={openChapter}
+          variant="card"
+        />
       </div>
     </div>
   );
@@ -478,7 +478,7 @@ export function ChapterReaderPage() {
     </div>
   );
 
-  if (previewQuery.loading) return <div className="text-subtext">加载中...</div>;
+  if (!chapterListQuery.hasLoaded && chapterListQuery.loading) return <div className="text-subtext">加载中...</div>;
 
   return (
     <ToolContent className="grid gap-4">
@@ -533,11 +533,11 @@ export function ChapterReaderPage() {
         </div>
 
         <div className="min-w-0 truncate text-xs text-subtext">
-          {activeChapter ? `正在阅读：第 ${activeChapter.number} 章` : "请选择章节"}
+          {activeChapterSummary ? `正在阅读：第 ${activeChapterSummary.number} 章` : "请选择章节"}
         </div>
 
-        {activeChapter ? (
-          <button className="btn btn-secondary" onClick={() => openEditor(activeChapter.id)} type="button">
+        {activeChapterSummary ? (
+          <button className="btn btn-secondary" onClick={() => openEditor(activeChapterSummary.id)} type="button">
             <Edit3 size={16} />
             去写作
           </button>
@@ -553,20 +553,23 @@ export function ChapterReaderPage() {
 
         <section className="min-w-0 flex-1">
           <div className="panel p-8">
-            {activeChapter ? (
+            {activeChapterSummary ? (
               <>
                 <div className="mb-4">
                   <div className="font-content text-2xl text-ink">
-                    第 {activeChapter.number} 章{activeChapter.title?.trim() ? ` · ${activeChapter.title}` : ""}
+                    第 {activeChapterSummary.number} 章
+                    {activeChapterSummary.title?.trim() ? ` · ${activeChapterSummary.title}` : ""}
                   </div>
-                  {activeChapter.status !== "done" ? (
+                  {activeChapterSummary.status !== "done" ? (
                     <div className="mt-1 text-xs text-subtext">
-                      提示：本章状态为 {humanizeChapterStatusZh(activeChapter.status)}。
+                      提示：本章状态为 {humanizeChapterStatusZh(activeChapterSummary.status)}。
                     </div>
                   ) : null}
                 </div>
                 <div className="atelier-content mx-auto max-w-4xl text-ink">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{activeChapter.content_md || "_（空）_"}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {loadingChapter ? "_(loading...)_" : activeChapter?.content_md || "_（空）_"}
+                  </ReactMarkdown>
                 </div>
               </>
             ) : (

@@ -1,22 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { useChapterMetaList } from "./useChapterMetaList";
 import { useProjectData } from "./useProjectData";
 import { apiJson } from "../services/apiClient";
 import { computeWizardProgress, onWizardProgressInvalidated, type WizardProgress } from "../services/wizard";
-import type { Chapter, Character, LLMPreset, LLMProfile, Outline, Project, ProjectSettings } from "../types";
+import type { ChapterListItem, Character, LLMPreset, LLMProfile, Outline, Project, ProjectSettings } from "../types";
 
 type WizardLoaded = {
   project: Project;
   settings: ProjectSettings;
   characters: Character[];
   outline: Outline;
-  chapters: Chapter[];
   llmPreset: LLMPreset;
   profiles: LLMProfile[];
 };
 
 const EMPTY_CHARACTERS: Character[] = [];
-const EMPTY_CHAPTERS: Chapter[] = [];
+const EMPTY_CHAPTERS: ChapterListItem[] = [];
 
 export function useWizardProgress(projectId: string | undefined): {
   loading: boolean;
@@ -25,6 +25,7 @@ export function useWizardProgress(projectId: string | undefined): {
   bumpLocal: () => void;
 } {
   const [, setVersion] = useState(0);
+  const chapterListQuery = useChapterMetaList(projectId);
 
   const wizardQuery = useProjectData<WizardLoaded>(projectId, async (id) => {
     const [pRes, settingsRes, charsRes, outlineRes, presetRes, profilesRes] = await Promise.all([
@@ -35,13 +36,11 @@ export function useWizardProgress(projectId: string | undefined): {
       apiJson<{ llm_preset: LLMPreset }>(`/api/projects/${id}/llm_preset`),
       apiJson<{ profiles: LLMProfile[] }>(`/api/llm_profiles`),
     ]);
-    const chaptersRes = await apiJson<{ chapters: Chapter[] }>(`/api/projects/${id}/chapters`);
     return {
       project: pRes.data.project,
       settings: settingsRes.data.settings,
       characters: charsRes.data.characters,
       outline: outlineRes.data.outline,
-      chapters: chaptersRes.data.chapters,
       llmPreset: presetRes.data.llm_preset,
       profiles: profilesRes.data.profiles,
     };
@@ -52,12 +51,17 @@ export function useWizardProgress(projectId: string | undefined): {
   const loadingRef = useRef(false);
 
   useEffect(() => {
-    loadingRef.current = loading;
-  }, [loading]);
+    loadingRef.current = loading || (!chapterListQuery.hasLoaded && chapterListQuery.loading);
+  }, [chapterListQuery.hasLoaded, chapterListQuery.loading, loading]);
 
   const bumpLocal = useCallback(() => {
     setVersion((v) => v + 1);
   }, []);
+
+  const refreshChapters = chapterListQuery.refresh;
+  const refreshAll = useCallback(async () => {
+    await Promise.all([refresh(), refreshChapters()]);
+  }, [refresh, refreshChapters]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -71,7 +75,7 @@ export function useWizardProgress(projectId: string | undefined): {
       refreshDebounceRef.current = window.setTimeout(() => {
         refreshDebounceRef.current = null;
         if (loadingRef.current) return;
-        void refresh();
+        void refreshAll();
       }, 80);
     });
     return () => {
@@ -81,7 +85,7 @@ export function useWizardProgress(projectId: string | undefined): {
         refreshDebounceRef.current = null;
       }
     };
-  }, [bumpLocal, projectId, refresh]);
+  }, [bumpLocal, projectId, refreshAll]);
 
   const project = data?.project ?? null;
   const selectedProfileId = project?.llm_profile_id ?? null;
@@ -92,15 +96,15 @@ export function useWizardProgress(projectId: string | undefined): {
     settings: data?.settings ?? null,
     characters: data?.characters ?? EMPTY_CHARACTERS,
     outline: data?.outline ?? null,
-    chapters: data?.chapters ?? EMPTY_CHAPTERS,
+    chapters: (chapterListQuery.chapters as ChapterListItem[]) ?? EMPTY_CHAPTERS,
     llmPreset: data?.llmPreset ?? null,
     llmProfile,
   });
 
   return {
-    loading,
+    loading: loading || (!chapterListQuery.hasLoaded && chapterListQuery.loading),
     progress,
-    refresh,
+    refresh: refreshAll,
     bumpLocal,
   };
 }

@@ -119,17 +119,59 @@ export interface OutlineListItem {
   has_chapters: boolean;
 }
 
-export interface Chapter {
+export interface ChapterBase {
   id: string;
   project_id: string;
   outline_id: string;
   number: number;
   title?: string | null;
+  status: ChapterStatus;
+  updated_at: string;
+}
+
+export interface ChapterDetail extends ChapterBase {
   plan?: string | null;
   content_md?: string | null;
   summary?: string | null;
-  status: ChapterStatus;
-  updated_at: string;
+}
+
+export type Chapter = ChapterDetail;
+
+export interface ChapterListItem extends ChapterBase {
+  has_plan: boolean;
+  has_summary: boolean;
+  has_content: boolean;
+}
+
+export interface ChapterMetaPage {
+  chapters: ChapterListItem[];
+  next_cursor: number | null;
+  has_more: boolean;
+  returned: number;
+  total: number;
+}
+
+export interface CreateChapterInput {
+  number: number;
+  title?: string | null;
+  plan?: string | null;
+  status?: ChapterStatus;
+}
+
+export interface UpdateChapterInput {
+  title?: string | null;
+  plan?: string | null;
+  content_md?: string | null;
+  summary?: string | null;
+  status?: ChapterStatus;
+}
+
+export interface BulkCreateChapterInput {
+  chapters: Array<{
+    number: number;
+    title?: string | null;
+    plan?: string | null;
+  }>;
 }
 
 export interface PromptPreset {

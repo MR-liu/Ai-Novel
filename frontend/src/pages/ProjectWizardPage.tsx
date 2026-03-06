@@ -10,12 +10,14 @@ import { ProgressBar } from "../components/ui/ProgressBar";
 import { useConfirm } from "../components/ui/confirm";
 import { useToast } from "../components/ui/toast";
 import { useProjects } from "../contexts/projects";
+import { useChapterMetaList } from "../hooks/useChapterMetaList";
 import { useProjectData } from "../hooks/useProjectData";
 import { duration, transition } from "../lib/motion";
 import { UI_COPY } from "../lib/uiCopy";
 import { ApiError, apiJson } from "../services/apiClient";
+import { chapterStore } from "../services/chapterStore";
 import { computeWizardProgress, setWizardStepSkipped, type WizardStep, type WizardStepKey } from "../services/wizard";
-import type { Chapter, Character, LLMPreset, LLMProfile, Outline, ProjectSettings } from "../types";
+import type { ChapterListItem, Character, LLMPreset, LLMProfile, Outline, ProjectSettings } from "../types";
 
 type OutlineGenChapter = { number: number; title: string; beats: string[] };
 type OutlineGenResult = {
@@ -29,13 +31,12 @@ type WizardLoaded = {
   settings: ProjectSettings;
   characters: Character[];
   outline: Outline;
-  chapters: Chapter[];
   llmPreset: LLMPreset;
   profiles: LLMProfile[];
 };
 
 const EMPTY_CHARACTERS: Character[] = [];
-const EMPTY_CHAPTERS: Chapter[] = [];
+const EMPTY_CHAPTERS: ChapterListItem[] = [];
 const EMPTY_PROFILES: LLMProfile[] = [];
 
 export function ProjectWizardPage() {
@@ -50,6 +51,7 @@ export function ProjectWizardPage() {
 
   const [version, setVersion] = useState(0);
   const [autoRunning, setAutoRunning] = useState(false);
+  const chapterListQuery = useChapterMetaList(projectId);
 
   const wizardQuery = useProjectData<WizardLoaded>(projectId, async (id) => {
     const [settingsRes, charsRes, outlineRes, presetRes, profilesRes] = await Promise.all([
@@ -59,22 +61,24 @@ export function ProjectWizardPage() {
       apiJson<{ llm_preset: LLMPreset }>(`/api/projects/${id}/llm_preset`),
       apiJson<{ profiles: LLMProfile[] }>(`/api/llm_profiles`),
     ]);
-    const chaptersRes = await apiJson<{ chapters: Chapter[] }>(`/api/projects/${id}/chapters`);
     return {
       settings: settingsRes.data.settings,
       characters: charsRes.data.characters,
       outline: outlineRes.data.outline,
-      chapters: chaptersRes.data.chapters,
       llmPreset: presetRes.data.llm_preset,
       profiles: profilesRes.data.profiles,
     };
   });
 
-  const reload = wizardQuery.refresh;
+  const refreshWizardData = wizardQuery.refresh;
+  const refreshChapters = chapterListQuery.refresh;
+  const reload = useCallback(async () => {
+    await Promise.all([refreshWizardData(), refreshChapters()]);
+  }, [refreshChapters, refreshWizardData]);
   const settings = wizardQuery.data?.settings ?? null;
   const characters = wizardQuery.data?.characters ?? EMPTY_CHARACTERS;
   const outline = wizardQuery.data?.outline ?? null;
-  const chapters = wizardQuery.data?.chapters ?? EMPTY_CHAPTERS;
+  const chapters = (chapterListQuery.chapters as ChapterListItem[]) ?? EMPTY_CHAPTERS;
   const llmPreset = wizardQuery.data?.llmPreset ?? null;
   const profiles = wizardQuery.data?.profiles ?? EMPTY_PROFILES;
 
@@ -175,10 +179,7 @@ export function ProjectWizardPage() {
       };
 
       try {
-        await apiJson<{ chapters: Chapter[] }>(`/api/projects/${projectId}/chapters/bulk_create`, {
-          method: "POST",
-          body: JSON.stringify(payload),
-        });
+        await chapterStore.bulkCreateProjectChapters(projectId, payload);
       } catch (e) {
         const err = e as ApiError;
         if (err.code === "CONFLICT" && err.status === 409) {
@@ -196,10 +197,7 @@ export function ProjectWizardPage() {
             danger: true,
           });
           if (!doubleCheckOk) return;
-          await apiJson<{ chapters: Chapter[] }>(`/api/projects/${projectId}/chapters/bulk_create?replace=true`, {
-            method: "POST",
-            body: JSON.stringify(payload),
-          });
+          await chapterStore.bulkCreateProjectChapters(projectId, payload, { replace: true });
         } else {
           throw e;
         }

@@ -7,16 +7,14 @@ import remarkGfm from "remark-gfm";
 
 import { WizardNextBar } from "../components/atelier/WizardNextBar";
 import { PaperContent } from "../components/layout/AppShell";
+import { ChapterVirtualList } from "../components/writing/ChapterVirtualList";
 import { Drawer } from "../components/ui/Drawer";
-import { useProjectData } from "../hooks/useProjectData";
+import { useChapterDetail } from "../hooks/useChapterDetail";
+import { useChapterMetaList } from "../hooks/useChapterMetaList";
 import { useWizardProgress } from "../hooks/useWizardProgress";
-import { apiJson } from "../services/apiClient";
+import { chapterStore } from "../services/chapterStore";
 import { markWizardPreviewSeen } from "../services/wizard";
-import type { Chapter } from "../types";
-
-type PreviewLoaded = { chapters: Chapter[] };
-
-const EMPTY_CHAPTERS: Chapter[] = [];
+import type { ChapterListItem } from "../types";
 
 function humanizeChapterStatusZh(status: string): string {
   const s = String(status || "").trim();
@@ -42,12 +40,8 @@ export function PreviewPage() {
     bumpLocal();
   }, [bumpLocal, projectId]);
 
-  const previewQuery = useProjectData<PreviewLoaded>(projectId, async (id) => {
-    const res = await apiJson<{ chapters: Chapter[] }>(`/api/projects/${id}/chapters`);
-    return { chapters: res.data.chapters };
-  });
-
-  const chapters = previewQuery.data?.chapters ?? EMPTY_CHAPTERS;
+  const chapterListQuery = useChapterMetaList(projectId);
+  const chapters = chapterListQuery.chapters as ChapterListItem[];
   const sortedChapters = useMemo(() => [...chapters].sort((a, b) => (a.number ?? 0) - (b.number ?? 0)), [chapters]);
   const doneCount = useMemo(
     () => sortedChapters.reduce((acc, c) => acc + (c.status === "done" ? 1 : 0), 0),
@@ -68,7 +62,7 @@ export function PreviewPage() {
     return visibleChapters.findIndex((c) => c.id === effectiveActiveId);
   }, [effectiveActiveId, visibleChapters]);
 
-  const activeChapter = useMemo(() => {
+  const activeChapterMeta = useMemo(() => {
     if (activeIndex < 0) return null;
     return visibleChapters[activeIndex] ?? null;
   }, [activeIndex, visibleChapters]);
@@ -99,6 +93,16 @@ export function PreviewPage() {
     setMobileListOpen(false);
   }, []);
 
+  const { chapter: activeChapter, loading: loadingChapter } = useChapterDetail(effectiveActiveId, {
+    enabled: Boolean(effectiveActiveId),
+  });
+  const activeChapterSummary = activeChapter ?? activeChapterMeta;
+
+  useEffect(() => {
+    if (prevChapter) void chapterStore.prefetchChapterDetail(prevChapter.id);
+    if (nextChapter) void chapterStore.prefetchChapterDetail(nextChapter.id);
+  }, [nextChapter, prevChapter]);
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
@@ -125,11 +129,11 @@ export function PreviewPage() {
   }, [nextChapter, openChapter, prevChapter]);
 
   const list = (
-    <div className="flex flex-col">
+    <div className="flex h-full flex-col">
       <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
         <div className="inline-flex items-center gap-2 text-sm text-ink">
           <BookOpen size={16} />
-          章节
+          {"章节"}
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -140,49 +144,33 @@ export function PreviewPage() {
             {onlyDone ? "显示全部" : "只看定稿"}
           </button>
           <span className="text-[11px] text-subtext">
-            {doneCount}/{sortedChapters.length} 已定稿
+            {doneCount}/{sortedChapters.length} {"已定稿"}
           </span>
         </div>
       </div>
 
-      <div className="p-2 pb-24">
-        {sortedChapters.length === 0 ? (
-          <div className="p-3 text-sm text-subtext">暂无章节</div>
-        ) : onlyDone && visibleChapters.length === 0 ? (
-          <div className="p-3 text-sm text-subtext">暂无已定稿章节</div>
-        ) : null}
-        <div className="grid gap-1">
-          {visibleChapters.map((c) => {
-            const isActive = c.id === effectiveActiveId;
-            return (
-              <button
-                key={c.id}
-                className={clsx(
-                  "ui-focus-ring ui-transition-fast flex w-full items-center justify-between gap-2 rounded-atelier border px-3 py-2 text-left text-sm motion-safe:active:scale-[0.99]",
-                  isActive
-                    ? "border-accent/40 bg-accent/10 text-ink"
-                    : "border-border bg-canvas text-subtext hover:bg-surface",
-                )}
-                onClick={() => {
-                  openChapter(c.id);
-                }}
-                type="button"
-              >
-                <span className="min-w-0 truncate">
-                  {c.number}. {c.title?.trim() ? c.title : "（未命名）"}
-                </span>
-                <span className={clsx("shrink-0 text-[11px]", c.status === "done" ? "text-accent" : "text-subtext")}>
-                  {humanizeChapterStatusZh(c.status)}
-                </span>
-              </button>
-            );
-          })}
-        </div>
+      <div className="min-h-0 flex-1 p-2">
+        <ChapterVirtualList
+          chapters={visibleChapters}
+          activeId={effectiveActiveId}
+          ariaLabel="章节列表"
+          className="h-full"
+          emptyState={
+            sortedChapters.length === 0 ? (
+              <div className="p-3 text-sm text-subtext">{"暂无章节"}</div>
+            ) : (
+              <div className="p-3 text-sm text-subtext">{"暂无已定稿章节"}</div>
+            )
+          }
+          getStatusLabel={(chapter) => humanizeChapterStatusZh(chapter.status)}
+          onSelectChapter={openChapter}
+          variant="card"
+        />
       </div>
     </div>
   );
 
-  if (previewQuery.loading) return <div className="text-subtext">加载中...</div>;
+  if (!chapterListQuery.hasLoaded && chapterListQuery.loading) return <div className="text-subtext">加载中...</div>;
 
   return (
     <PaperContent className="grid gap-4 pb-24">
@@ -234,16 +222,16 @@ export function PreviewPage() {
         </div>
 
         <div className="min-w-0 truncate text-xs text-subtext">
-          {activeChapter ? `正在预览：第 ${activeChapter.number} 章` : "请选择章节"}
+          {activeChapterSummary ? `正在预览：第 ${activeChapterSummary.number} 章` : "请选择章节"}
         </div>
 
-        {activeChapter ? (
+        {activeChapterSummary ? (
           <div className="flex flex-wrap items-center gap-2">
-            <button className="btn btn-secondary" onClick={() => openReader(activeChapter.id)} type="button">
+            <button className="btn btn-secondary" onClick={() => openReader(activeChapterSummary.id)} type="button">
               <StickyNote size={16} />
               阅读标注
             </button>
-            <button className="btn btn-secondary" onClick={() => openEditor(activeChapter.id)} type="button">
+            <button className="btn btn-secondary" onClick={() => openEditor(activeChapterSummary.id)} type="button">
               <Edit3 size={16} />
               编辑
             </button>
@@ -254,27 +242,30 @@ export function PreviewPage() {
       <div className="flex gap-4">
         {!collapsed ? (
           <aside className="hidden w-[280px] shrink-0 lg:block">
-            <div className="panel">{list}</div>
+            <div className="panel h-[calc(100vh-260px)] min-h-[520px] overflow-hidden">{list}</div>
           </aside>
         ) : null}
 
         <section className="min-w-0 flex-1">
           <div className="panel p-8">
-            {activeChapter ? (
+            {activeChapterSummary ? (
               <>
                 <div className="mb-4">
                   <div className="font-content text-2xl text-ink">
-                    第 {activeChapter.number} 章{activeChapter.title?.trim() ? ` · ${activeChapter.title}` : ""}
+                    第 {activeChapterSummary.number} 章
+                    {activeChapterSummary.title?.trim() ? ` · ${activeChapterSummary.title}` : ""}
                   </div>
-                  {activeChapter.status !== "done" ? (
+                  {activeChapterSummary.status !== "done" ? (
                     <div className="mt-1 text-xs text-subtext">
-                      提示：本章状态为 {humanizeChapterStatusZh(activeChapter.status)}，向导会以{" "}
+                      提示：本章状态为 {humanizeChapterStatusZh(activeChapterSummary.status)}，向导会以{" "}
                       {humanizeChapterStatusZh("done")} 作为“写完”判定。
                     </div>
                   ) : null}
                 </div>
                 <div className="atelier-content mx-auto max-w-4xl text-ink">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{activeChapter.content_md || "_（空）_"}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {loadingChapter ? "_(loading...)_" : activeChapter?.content_md || "_（空）_"}
+                  </ReactMarkdown>
                 </div>
               </>
             ) : (
@@ -299,7 +290,7 @@ export function PreviewPage() {
             关闭
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto">{list}</div>
+        <div className="min-h-0 flex-1">{list}</div>
       </Drawer>
 
       <WizardNextBar projectId={projectId} currentStep="preview" progress={wizardProgress} loading={wizardLoading} />
