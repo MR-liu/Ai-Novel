@@ -21,7 +21,8 @@ def _is_abs_path(value: str) -> bool:
     return bool(re.match(r"^[A-Za-z]:[\\/]", value))
 
 
-AppEnv = Literal["dev", "prod"]
+AppEnv = Literal["dev", "test", "prod"]
+LLMContractMode = Literal["audit", "enforce"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 TaskQueueBackend = Literal["rq", "inline"]
 CookieSameSite = Literal["lax", "strict", "none"]
@@ -35,6 +36,26 @@ VectorEmbeddingProvider = Literal[
     "local_proxy",
     "sentence_transformers",
 ]
+
+
+WEAK_PROD_ADMIN_PASSWORDS = {
+    "changeme123!",
+    "changeme",
+    "password123",
+    "password",
+    "admin123",
+    "admin",
+    "12345678",
+}
+
+
+def _is_weak_admin_password(value: str | None) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    if len(raw) < 8:
+        return True
+    return raw.lower() in WEAK_PROD_ADMIN_PASSWORDS
 
 
 class Settings(BaseSettings):
@@ -51,6 +72,7 @@ class Settings(BaseSettings):
 
     auth_session_signing_key: str | None = None
     auth_dev_fallback_user_id: str | None = "local-user"
+    llm_config_mode: LLMContractMode = "audit"
     auth_session_ttl_seconds: int = 60 * 60 * 24 * 7
     auth_refresh_threshold_seconds: int = 60 * 15
     auth_activity_touch_interval_seconds: int = 30
@@ -73,6 +95,15 @@ class Settings(BaseSettings):
     task_queue_backend: TaskQueueBackend = "rq"
     redis_url: str = "redis://localhost:6379/0"
     rq_queue_name: str = "default"
+    project_task_heartbeat_interval_seconds: int = 5
+    project_task_watchdog_enabled: bool = True
+    project_task_watchdog_interval_seconds: int = 15
+    project_task_stale_running_timeout_seconds: int = 120
+    project_task_queued_reconcile_after_seconds: int = 20
+    batch_generation_max_count: int = 200
+    batch_generation_project_active_limit: int = 1
+    batch_generation_user_active_limit: int = 3
+    batch_generation_provider_active_limit: int = 3
 
     vector_chroma_persist_dir: str | None = None
     vector_chroma_collection_naming: VectorChromaCollectionNaming = "hash"
@@ -142,9 +173,11 @@ class Settings(BaseSettings):
         raw = str(value).strip().lower()
         if raw in ("dev", "development"):
             return "dev"
+        if raw in ("test", "testing"):
+            return "test"
         if raw in ("prod", "production"):
             return "prod"
-        raise ValueError("APP_ENV must be 'dev' or 'prod'")
+        raise ValueError("APP_ENV must be 'dev', 'test', or 'prod'")
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -242,6 +275,16 @@ class Settings(BaseSettings):
     def _normalize_auth_dev_fallback_user_id(cls, value: object) -> str | None:
         raw = str(value or "").strip()
         return raw or None
+
+    @field_validator("llm_config_mode", mode="before")
+    @classmethod
+    def _normalize_llm_config_mode(cls, value: object) -> str:
+        raw = str(value or "").strip().lower()
+        if raw in ("", "audit"):
+            return "audit"
+        if raw in ("enforce", "strict"):
+            return "enforce"
+        raise ValueError("LLM_CONFIG_MODE must be audit or enforce")
 
     @field_validator("auth_session_ttl_seconds", mode="before")
     @classmethod
@@ -726,10 +769,14 @@ class Settings(BaseSettings):
             raise ValueError("TASK_QUEUE_BACKEND must be set to 'rq' when APP_ENV=prod")
         if self.app_env == "prod":
             origins = self.cors_origins_list()
+            if not origins:
+                raise ValueError("CORS_ORIGINS must be configured when APP_ENV=prod")
             if any(origin == "*" for origin in origins):
                 raise ValueError("CORS_ORIGINS must not contain '*' when APP_ENV=prod")
             if any(origin.lower() == "null" for origin in origins):
                 raise ValueError("CORS_ORIGINS must not contain 'null' when APP_ENV=prod")
+            if _is_weak_admin_password(self.auth_admin_password):
+                raise ValueError("AUTH_ADMIN_PASSWORD must not use weak or default credentials when APP_ENV=prod")
         if self.task_queue_backend == "rq" and not self.redis_url:
             raise ValueError("REDIS_URL must be set when TASK_QUEUE_BACKEND=rq")
         return self
@@ -745,3 +792,6 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+

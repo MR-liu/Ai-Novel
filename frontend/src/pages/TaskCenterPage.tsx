@@ -1,14 +1,26 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { DebugDetails, DebugPageShell } from "../components/atelier/DebugPageShell";
 import { Drawer } from "../components/ui/Drawer";
 import { useToast } from "../components/ui/toast";
 import { useProjectData } from "../hooks/useProjectData";
+import { useProjectTaskEvents } from "../hooks/useProjectTaskEvents";
 import { copyText } from "../lib/copyText";
+import { createRequestSeqGuard } from "../lib/requestSeqGuard";
 import { humanizeChangeSetStatus, humanizeTaskStatus } from "../lib/humanize";
 import { ApiError, apiJson } from "../services/apiClient";
+import {
+  cancelBatchGenerationTask,
+  getProjectTaskRuntime,
+  pauseBatchGenerationTask,
+  resumeBatchGenerationTask,
+  retryFailedBatchGenerationTask,
+  skipFailedBatchGenerationTask,
+  type ProjectTaskRuntime,
+} from "../services/projectTaskRuntime";
 import { UI_COPY } from "../lib/uiCopy";
+import { ProjectTaskRuntimePanel } from "./taskCenter/ProjectTaskRuntimePanel";
 import { StatusBadge } from "./taskCenter/StatusBadge";
 import {
   extractChangeSetIdFromProjectTaskResult,
@@ -90,6 +102,12 @@ export function TaskCenterPage() {
   const [taskStatus, setTaskStatus] = useState<string>("all");
   const [projectTaskStatus, setProjectTaskStatus] = useState<string>("all");
   const [autoOpenedProjectTask, setAutoOpenedProjectTask] = useState<boolean>(false);
+  const projectTaskRefreshTimerRef = useRef<number | null>(null);
+  const projectTaskDetailGuardRef = useRef(createRequestSeqGuard());
+  const projectTaskRuntimeGuardRef = useRef(createRequestSeqGuard());
+  const [selectedProjectTaskRuntime, setSelectedProjectTaskRuntime] = useState<ProjectTaskRuntime | null>(null);
+  const [projectTaskRuntimeLoading, setProjectTaskRuntimeLoading] = useState<boolean>(false);
+  const [projectTaskBatchActionLoading, setProjectTaskBatchActionLoading] = useState<boolean>(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -242,6 +260,137 @@ export function TaskCenterPage() {
     void refreshProjectTasks();
   }, [refreshChangeSets, refreshProjectTasks, refreshTasks]);
 
+  const refreshSelectedProjectTask = useCallback(
+    async (taskId: string, options?: { silent?: boolean; loading?: boolean }) => {
+      const targetId = String(taskId || "").trim();
+      if (!targetId) return;
+      const seq = projectTaskDetailGuardRef.current.next();
+      if (options?.loading) {
+        setProjectTaskDetailLoading(true);
+      }
+      try {
+        const res = await apiJson<ProjectTaskSummary>(`/api/tasks/${encodeURIComponent(targetId)}`);
+        if (!projectTaskDetailGuardRef.current.isLatest(seq)) return;
+        setSelected((prev) =>
+          prev?.kind === "project_task" && prev.item.id === targetId ? { kind: "project_task", item: res.data } : prev,
+        );
+      } catch (e) {
+        if (!projectTaskDetailGuardRef.current.isLatest(seq)) return;
+        if (!options?.silent) {
+          const err =
+            e instanceof ApiError
+              ? e
+              : new ApiError({ code: "UNKNOWN", message: String(e), requestId: "unknown", status: 0 });
+          toast.toastError(`${err.message} (${err.code})`, err.requestId);
+        }
+      } finally {
+        if (options?.loading && projectTaskDetailGuardRef.current.isLatest(seq)) {
+          setProjectTaskDetailLoading(false);
+        }
+      }
+    },
+    [toast],
+  );
+
+  const refreshSelectedProjectTaskRuntime = useCallback(
+    async (taskId: string, options?: { silent?: boolean; loading?: boolean }) => {
+      const targetId = String(taskId || "").trim();
+      if (!targetId) return;
+      const seq = projectTaskRuntimeGuardRef.current.next();
+      if (options?.loading) {
+        setProjectTaskRuntimeLoading(true);
+      }
+      try {
+        const runtime = await getProjectTaskRuntime(targetId);
+        if (!projectTaskRuntimeGuardRef.current.isLatest(seq)) return;
+        setSelectedProjectTaskRuntime(runtime);
+      } catch (e) {
+        if (!projectTaskRuntimeGuardRef.current.isLatest(seq)) return;
+        if (!options?.silent) {
+          const err =
+            e instanceof ApiError
+              ? e
+              : new ApiError({ code: "UNKNOWN", message: String(e), requestId: "unknown", status: 0 });
+          toast.toastError(`${err.message} (${err.code})`, err.requestId);
+        }
+      } finally {
+        if (options?.loading && projectTaskRuntimeGuardRef.current.isLatest(seq)) {
+          setProjectTaskRuntimeLoading(false);
+        }
+      }
+    },
+    [toast],
+  );
+
+  const scheduleProjectTaskRefresh = useCallback(
+    (taskId?: string | null) => {
+      if (projectTaskRefreshTimerRef.current !== null) {
+        window.clearTimeout(projectTaskRefreshTimerRef.current);
+      }
+      projectTaskRefreshTimerRef.current = window.setTimeout(() => {
+        projectTaskRefreshTimerRef.current = null;
+        void refreshProjectTasks();
+        if (taskId && selected?.kind === "project_task" && selected.item.id === taskId) {
+          void refreshSelectedProjectTask(taskId, { silent: true });
+          void refreshSelectedProjectTaskRuntime(taskId, { silent: true });
+        }
+      }, 120);
+    },
+    [refreshProjectTasks, refreshSelectedProjectTask, refreshSelectedProjectTaskRuntime, selected],
+  );
+
+  useEffect(() => {
+    const projectTaskDetailGuard = projectTaskDetailGuardRef.current;
+    const projectTaskRuntimeGuard = projectTaskRuntimeGuardRef.current;
+    return () => {
+      projectTaskDetailGuard.invalidate();
+      projectTaskRuntimeGuard.invalidate();
+      if (projectTaskRefreshTimerRef.current !== null) {
+        window.clearTimeout(projectTaskRefreshTimerRef.current);
+      }
+    };
+  }, []);
+
+  const projectTaskEvents = useProjectTaskEvents({
+    projectId,
+    enabled: Boolean(projectId),
+    onSnapshot: (snapshot) => {
+      if ((snapshot.active_tasks || []).length > 0) {
+        scheduleProjectTaskRefresh(snapshot.active_tasks[0]?.id);
+      }
+    },
+    onEvent: (event) => {
+      scheduleProjectTaskRefresh(event.task_id);
+    },
+  });
+
+  useEffect(() => {
+    if (!projectId) return;
+    if (projectTaskEvents.status === "open") return;
+    const id = window.setInterval(() => {
+      void refreshProjectTasks();
+      if (selected?.kind === "project_task") {
+        void refreshSelectedProjectTask(selected.item.id, { silent: true });
+        void refreshSelectedProjectTaskRuntime(selected.item.id, { silent: true });
+      }
+    }, 8000);
+    return () => window.clearInterval(id);
+  }, [
+    projectId,
+    projectTaskEvents.status,
+    refreshProjectTasks,
+    refreshSelectedProjectTask,
+    refreshSelectedProjectTaskRuntime,
+    selected,
+  ]);
+
+  const projectTaskLiveStatusLabel = useMemo(() => {
+    if (projectTaskEvents.status === "open") return "connected";
+    if (projectTaskEvents.status === "connecting") return "reconnecting";
+    if (projectTaskEvents.status === "error") return "fallback polling";
+    return "idle";
+  }, [projectTaskEvents.status]);
+
   const copyDebugInfo = useCallback(async () => {
     if (!selected) return;
     if (selected.kind === "change_set") {
@@ -256,7 +405,7 @@ export function TaskCenterPage() {
         `created_at=${it.created_at || "-"}`,
         `updated_at=${it.updated_at || "-"}`,
       ];
-      await copyText(lines.join("\n"), { title: "复制失败：请手动复制 Debug 信息" });
+      await copyText(lines.join("\n"), { title: "Copy debug info manually" });
       return;
     }
 
@@ -273,7 +422,7 @@ export function TaskCenterPage() {
         `error_message=${t.error_message || "-"}`,
         `error=${safeJsonStringify(t.error ?? null)}`,
       ];
-      await copyText(lines.join("\n"), { title: "复制失败：请手动复制 Debug 信息" });
+      await copyText(lines.join("\n"), { title: "Copy debug info manually" });
       return;
     }
 
@@ -288,32 +437,22 @@ export function TaskCenterPage() {
       `error_message=${pt.error_message || "-"}`,
       `error=${safeJsonStringify(pt.error ?? null)}`,
     ];
-    await copyText(lines.join("\n"), { title: "复制失败：请手动复制 Debug 信息" });
+    await copyText(lines.join("\n"), { title: "Copy debug info manually" });
   }, [selected]);
 
   const copyRawJson = useCallback(async () => {
     if (!selected) return;
-    await copyText(safeJsonStringify(selected.item), { title: "复制失败：请手动复制 Debug 信息" });
+    await copyText(safeJsonStringify(selected.item), { title: "Copy debug info manually" });
   }, [selected]);
 
   const selectProjectTask = useCallback(
     async (t: ProjectTaskSummary) => {
       setSelected({ kind: "project_task", item: t });
-      setProjectTaskDetailLoading(true);
-      try {
-        const res = await apiJson<ProjectTaskSummary>(`/api/tasks/${encodeURIComponent(t.id)}`);
-        setSelected({ kind: "project_task", item: res.data });
-      } catch (e) {
-        const err =
-          e instanceof ApiError
-            ? e
-            : new ApiError({ code: "UNKNOWN", message: String(e), requestId: "unknown", status: 0 });
-        toast.toastError(`${err.message} (${err.code})`, err.requestId);
-      } finally {
-        setProjectTaskDetailLoading(false);
-      }
+      setSelectedProjectTaskRuntime(null);
+      void refreshSelectedProjectTask(t.id, { loading: true });
+      void refreshSelectedProjectTaskRuntime(t.id, { loading: true });
     },
-    [toast],
+    [refreshSelectedProjectTask, refreshSelectedProjectTaskRuntime],
   );
 
   const retryProjectTask = useCallback(
@@ -365,6 +504,56 @@ export function TaskCenterPage() {
       }
     },
     [refreshProjectTasks, toast],
+  );
+
+  const runSelectedBatchAction = useCallback(
+    async (action: "pause" | "resume" | "retry_failed" | "skip_failed" | "cancel") => {
+      if (selected?.kind !== "project_task") return;
+      const batchTaskId = String(selectedProjectTaskRuntime?.batch?.task.id || "").trim();
+      if (!batchTaskId) return;
+      const projectTaskId = selected.item.id;
+      setProjectTaskBatchActionLoading(true);
+      try {
+        if (action === "pause") {
+          await pauseBatchGenerationTask(batchTaskId);
+          toast.toastSuccess("Batch paused.");
+        } else if (action === "resume") {
+          await resumeBatchGenerationTask(batchTaskId);
+          toast.toastSuccess("Batch resumed.");
+        } else if (action === "retry_failed") {
+          await retryFailedBatchGenerationTask(batchTaskId);
+          toast.toastSuccess("Failed chapters queued for retry.");
+        } else if (action === "skip_failed") {
+          await skipFailedBatchGenerationTask(batchTaskId);
+          toast.toastSuccess("Failed chapters skipped.");
+        } else {
+          if (!window.confirm("Cancel this batch task?")) return;
+          await cancelBatchGenerationTask(batchTaskId);
+          toast.toastSuccess("Batch canceled.");
+        }
+        await refreshProjectTasks();
+        await Promise.all([
+          refreshSelectedProjectTask(projectTaskId, { silent: true }),
+          refreshSelectedProjectTaskRuntime(projectTaskId, { silent: true }),
+        ]);
+      } catch (e) {
+        const err =
+          e instanceof ApiError
+            ? e
+            : new ApiError({ code: "UNKNOWN", message: String(e), requestId: "unknown", status: 0 });
+        toast.toastError(`${err.message} (${err.code})`, err.requestId);
+      } finally {
+        setProjectTaskBatchActionLoading(false);
+      }
+    },
+    [
+      refreshProjectTasks,
+      refreshSelectedProjectTask,
+      refreshSelectedProjectTaskRuntime,
+      selected,
+      selectedProjectTaskRuntime,
+      toast,
+    ],
   );
 
   const applyChangeSet = useCallback(
@@ -429,18 +618,18 @@ export function TaskCenterPage() {
     if (!targetId) return;
     if (autoOpenedProjectTask) return;
     setAutoOpenedProjectTask(true);
-    setProjectTaskDetailLoading(true);
-    apiJson<ProjectTaskSummary>(`/api/tasks/${encodeURIComponent(targetId)}`)
-      .then((res) => setSelected({ kind: "project_task", item: res.data }))
-      .catch((e) => {
-        const err =
-          e instanceof ApiError
-            ? e
-            : new ApiError({ code: "UNKNOWN", message: String(e), requestId: "unknown", status: 0 });
-        toast.toastError(`${err.message} (${err.code})`, err.requestId);
-      })
-      .finally(() => setProjectTaskDetailLoading(false));
-  }, [autoOpenedProjectTask, projectId, searchParams, toast]);
+    setSelectedProjectTaskRuntime(null);
+    void refreshSelectedProjectTask(targetId, { loading: true });
+    void refreshSelectedProjectTaskRuntime(targetId, { loading: true });
+  }, [autoOpenedProjectTask, projectId, refreshSelectedProjectTask, refreshSelectedProjectTaskRuntime, searchParams]);
+
+  useEffect(() => {
+    if (selected?.kind === "project_task") return;
+    projectTaskRuntimeGuardRef.current.invalidate();
+    setSelectedProjectTaskRuntime(null);
+    setProjectTaskRuntimeLoading(false);
+    setProjectTaskBatchActionLoading(false);
+  }, [selected]);
 
   const selectedProjectTaskChangeSetId = useMemo(() => {
     if (selected?.kind !== "project_task") return null;
@@ -728,6 +917,9 @@ export function TaskCenterPage() {
                 用于 worldbook/search/vector/graph 等自动化后台更新；点击条目查看详情（params/result/error 已脱敏）
               </div>
               <div className="mt-1 text-[11px] text-subtext">状态说明：排队中→运行中→完成/失败</div>
+              <div className="mt-1 text-[11px] text-subtext" aria-label="taskcenter_projecttask_live_status">
+                Project SSE: {projectTaskLiveStatusLabel}
+              </div>
               <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-subtext">
                 <span>总计 {projectTaskSummary.all}</span>
                 <span>排队中 {projectTaskSummary.queued}</span>
@@ -909,7 +1101,7 @@ export function TaskCenterPage() {
                 >
                   刷新详情
                 </button>
-                {selected.item.status === "failed" ? (
+                {selected.item.status === "failed" && !selectedProjectTaskRuntime?.batch ? (
                   <button
                     className="btn btn-secondary btn-sm"
                     aria-label="重试项目任务 (taskcenter_projecttask_retry_detail)"
@@ -919,7 +1111,7 @@ export function TaskCenterPage() {
                     重试
                   </button>
                 ) : null}
-                {selected.item.status === "queued" ? (
+                {selected.item.status === "queued" && !selectedProjectTaskRuntime?.batch ? (
                   <button
                     className="btn btn-secondary btn-sm"
                     aria-label="取消项目任务 (taskcenter_projecttask_cancel_detail)"
@@ -933,6 +1125,17 @@ export function TaskCenterPage() {
               {projectTaskDetailLoading ? <div className="mt-2 text-xs text-subtext">加载中...</div> : null}
             </section>
 
+            <ProjectTaskRuntimePanel
+              runtime={selectedProjectTaskRuntime}
+              loading={projectTaskRuntimeLoading}
+              actionLoading={projectTaskBatchActionLoading}
+              onRefresh={() => void refreshSelectedProjectTaskRuntime(selected.item.id, { loading: true })}
+              onPauseBatch={() => void runSelectedBatchAction("pause")}
+              onResumeBatch={() => void runSelectedBatchAction("resume")}
+              onRetryFailedBatch={() => void runSelectedBatchAction("retry_failed")}
+              onSkipFailedBatch={() => void runSelectedBatchAction("skip_failed")}
+              onCancelBatch={() => void runSelectedBatchAction("cancel")}
+            />
             {selectedProjectTaskRunId ? (
               <section
                 className="rounded-atelier border border-border bg-surface p-3"
