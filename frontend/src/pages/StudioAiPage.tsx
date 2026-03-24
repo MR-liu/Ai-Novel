@@ -5,11 +5,13 @@ import { StudioWorkbenchPanel } from "../components/layout/StudioWorkbenchPanel"
 import { useAppMode } from "../contexts/AppModeContext";
 import { buildProjectWritePath, buildStudioAiPath, type StudioAiTab } from "../lib/projectRoutes";
 
-import { PromptStudioPage } from "./PromptStudioPage";
-import { PromptTemplatesPage } from "./PromptTemplatesPage";
-import { PromptsPage } from "./PromptsPage";
-import { StylesPage } from "./StylesPage";
+import { lazyPage, PageContentLoader } from "./lazyPage";
 import { STUDIO_AI_TAB_COPY, STUDIO_AI_TABS } from "./studioWorkbenchModels";
+
+const LazyPromptStudioPage = lazyPage(() => import("./PromptStudioPage"), (mod) => mod.PromptStudioPage);
+const LazyPromptTemplatesPage = lazyPage(() => import("./PromptTemplatesPage"), (mod) => mod.PromptTemplatesPage);
+const LazyPromptsPage = lazyPage(() => import("./PromptsPage"), (mod) => mod.PromptsPage);
+const LazyStylesPage = lazyPage(() => import("./StylesPage"), (mod) => mod.StylesPage);
 
 export function StudioAiPage() {
   const { mode } = useAppMode();
@@ -82,11 +84,13 @@ export function StudioAiPage() {
           </>
         }
       />
-      {currentTab === "models" ? <PromptsPage /> : null}
-      {currentTab === "prompts" ? <PromptsPage /> : null}
-      {currentTab === "prompt-studio" ? <PromptStudioPage /> : null}
-      {currentTab === "templates" ? <PromptTemplatesPage /> : null}
-      {currentTab === "styles" ? <StylesPage /> : null}
+      <PageContentLoader>
+        {currentTab === "models" ? <LazyPromptsPage /> : null}
+        {currentTab === "prompts" ? <LazyPromptsPage /> : null}
+        {currentTab === "prompt-studio" ? <LazyPromptStudioPage /> : null}
+        {currentTab === "templates" ? <LazyPromptTemplatesPage /> : null}
+        {currentTab === "styles" ? <LazyStylesPage /> : null}
+      </PageContentLoader>
     </div>
   );
 }

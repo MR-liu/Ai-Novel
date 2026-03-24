@@ -5,11 +5,13 @@ import { StudioWorkbenchPanel } from "../components/layout/StudioWorkbenchPanel"
 import { useAppMode } from "../contexts/AppModeContext";
 import { buildProjectWritePath, buildStudioResearchPath, type StudioResearchTab } from "../lib/projectRoutes";
 
-import { GraphPage } from "./GraphPage";
-import { ImportPage } from "./ImportPage";
-import { RagPage } from "./RagPage";
-import { SearchPage } from "./SearchPage";
+import { lazyPage, PageContentLoader } from "./lazyPage";
 import { STUDIO_RESEARCH_TAB_COPY, STUDIO_RESEARCH_TABS } from "./studioWorkbenchModels";
+
+const LazyGraphPage = lazyPage(() => import("./GraphPage"), (mod) => mod.GraphPage);
+const LazyImportPage = lazyPage(() => import("./ImportPage"), (mod) => mod.ImportPage);
+const LazyRagPage = lazyPage(() => import("./RagPage"), (mod) => mod.RagPage);
+const LazySearchPage = lazyPage(() => import("./SearchPage"), (mod) => mod.SearchPage);
 
 export function StudioResearchPage() {
   const { mode } = useAppMode();
@@ -82,10 +84,12 @@ export function StudioResearchPage() {
           </>
         }
       />
-      {currentTab === "import-docs" ? <ImportPage /> : null}
-      {currentTab === "knowledge-base" ? <RagPage /> : null}
-      {currentTab === "search" ? <SearchPage /> : null}
-      {currentTab === "graph" ? <GraphPage /> : null}
+      <PageContentLoader>
+        {currentTab === "import-docs" ? <LazyImportPage /> : null}
+        {currentTab === "knowledge-base" ? <LazyRagPage /> : null}
+        {currentTab === "search" ? <LazySearchPage /> : null}
+        {currentTab === "graph" ? <LazyGraphPage /> : null}
+      </PageContentLoader>
     </div>
   );
 }

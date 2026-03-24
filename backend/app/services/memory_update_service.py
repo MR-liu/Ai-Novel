@@ -8,7 +8,6 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.core.errors import AppError
 from app.core.logging import exception_log_fields, log_event, redact_secrets_text
 from app.core.secrets import redact_api_keys
@@ -37,6 +36,22 @@ from app.services.memory_change_set_views import (
     list_memory_tasks,
     memory_task_to_dict,
     parse_datetime as _parse_dt,
+)
+from app.services.memory_change_set_flow import (
+    build_change_set_response as _build_change_set_response,
+    find_existing_change_set_response as _find_existing_change_set_response,
+    load_existing_change_set as _load_existing_change_set,
+    load_change_set_items as _load_change_set_items,
+)
+from app.services.memory_change_set_apply_flow import (
+    apply_change_set_items as _apply_change_set_items,
+    rollback_change_set_items as _rollback_change_set_items,
+)
+from app.services.memory_task_flow import (
+    build_memory_task_error_payload as _build_memory_task_error_payload,
+    enqueue_memory_tasks as _enqueue_memory_tasks,
+    ensure_memory_tasks as _ensure_memory_tasks_impl,
+    run_memory_task_kind as _run_memory_task_kind,
 )
 from app.services.table_executor import TableUpdateV1Request, is_key_value_schema, validate_row_data_for_table
 from app.services.fractal_memory_service import rebuild_fractal_memory
@@ -247,31 +262,13 @@ def propose_chapter_memory_change_set(
     project_id = str(chapter.project_id)
     chapter_id = str(chapter.id)
 
-    existing = (
-        db.execute(
-            select(MemoryChangeSet).where(
-                MemoryChangeSet.project_id == project_id,
-                MemoryChangeSet.idempotency_key == payload.idempotency_key,
-            )
-        )
-        .scalars()
-        .first()
+    existing_response = _find_existing_change_set_response(
+        db=db,
+        project_id=project_id,
+        idempotency_key=payload.idempotency_key,
     )
-    if existing is not None:
-        items = (
-            db.execute(
-                select(MemoryChangeSetItem)
-                .where(MemoryChangeSetItem.change_set_id == existing.id)
-                .order_by(MemoryChangeSetItem.item_index.asc())
-            )
-            .scalars()
-            .all()
-        )
-        return {
-            "idempotent": True,
-            "change_set": _change_set_to_dict(existing),
-            "items": [_item_to_dict(i) for i in items],
-        }
+    if existing_response is not None:
+        return existing_response
 
     generation_run_id = new_id()
     db.add(
@@ -406,31 +403,10 @@ def propose_chapter_memory_change_set(
             idempotency_key=payload.idempotency_key,
             **exception_log_fields(exc),
         )
-        existing = (
-            db.execute(
-                select(MemoryChangeSet).where(
-                    MemoryChangeSet.project_id == project_id,
-                    MemoryChangeSet.idempotency_key == payload.idempotency_key,
-                )
-            )
-            .scalars()
-            .first()
-        )
+        existing = _load_existing_change_set(db=db, project_id=project_id, idempotency_key=payload.idempotency_key)
         if existing is not None:
-            items2 = (
-                db.execute(
-                    select(MemoryChangeSetItem)
-                    .where(MemoryChangeSetItem.change_set_id == existing.id)
-                    .order_by(MemoryChangeSetItem.item_index.asc())
-                )
-                .scalars()
-                .all()
-            )
-            return {
-                "idempotent": True,
-                "change_set": _change_set_to_dict(existing),
-                "items": [_item_to_dict(i) for i in items2],
-            }
+            items2 = _load_change_set_items(db=db, change_set_id=str(existing.id))
+            return _build_change_set_response(change_set=existing, items=items2, idempotent=True)
         raise
 
     log_event(
@@ -456,31 +432,13 @@ def propose_project_table_change_set(
     project_id: str,
     payload: TableUpdateV1Request,
 ) -> dict[str, Any]:
-    existing = (
-        db.execute(
-            select(MemoryChangeSet).where(
-                MemoryChangeSet.project_id == project_id,
-                MemoryChangeSet.idempotency_key == payload.idempotency_key,
-            )
-        )
-        .scalars()
-        .first()
+    existing_response = _find_existing_change_set_response(
+        db=db,
+        project_id=project_id,
+        idempotency_key=payload.idempotency_key,
     )
-    if existing is not None:
-        items = (
-            db.execute(
-                select(MemoryChangeSetItem)
-                .where(MemoryChangeSetItem.change_set_id == existing.id)
-                .order_by(MemoryChangeSetItem.item_index.asc())
-            )
-            .scalars()
-            .all()
-        )
-        return {
-            "idempotent": True,
-            "change_set": _change_set_to_dict(existing),
-            "items": [_item_to_dict(i) for i in items],
-        }
+    if existing_response is not None:
+        return existing_response
 
     generation_run_id = new_id()
     db.add(
@@ -613,31 +571,10 @@ def propose_project_table_change_set(
             idempotency_key=payload.idempotency_key,
             **exception_log_fields(exc),
         )
-        existing2 = (
-            db.execute(
-                select(MemoryChangeSet).where(
-                    MemoryChangeSet.project_id == project_id,
-                    MemoryChangeSet.idempotency_key == payload.idempotency_key,
-                )
-            )
-            .scalars()
-            .first()
-        )
+        existing2 = _load_existing_change_set(db=db, project_id=project_id, idempotency_key=payload.idempotency_key)
         if existing2 is not None:
-            items2 = (
-                db.execute(
-                    select(MemoryChangeSetItem)
-                    .where(MemoryChangeSetItem.change_set_id == existing2.id)
-                    .order_by(MemoryChangeSetItem.item_index.asc())
-                )
-                .scalars()
-                .all()
-            )
-            return {
-                "idempotent": True,
-                "change_set": _change_set_to_dict(existing2),
-                "items": [_item_to_dict(i) for i in items2],
-            }
+            items2 = _load_change_set_items(db=db, change_set_id=str(existing2.id))
+            return _build_change_set_response(change_set=existing2, items=items2, idempotent=True)
         raise
 
     log_event(
@@ -785,64 +722,21 @@ def apply_memory_change_set(
     if change_set.status != "proposed":
         raise AppError.conflict(details={"status": change_set.status})
 
-    items = (
-        db.execute(
-            select(MemoryChangeSetItem)
-            .where(MemoryChangeSetItem.change_set_id == change_set.id)
-            .order_by(MemoryChangeSetItem.item_index.asc())
-        )
-        .scalars()
-        .all()
-    )
+    items = _load_change_set_items(db=db, change_set_id=str(change_set.id))
     if not items:
         raise AppError.validation(details={"reason": "no_items"})
 
-    warnings: list[dict[str, Any]] = []
-
     try:
-        for item in items:
-            target_table = str(item.target_table)
-            target_id = str(item.target_id or "")
-            if not target_id:
-                raise AppError.validation(details={"item_id": str(item.id), "reason": "target_id_missing"})
-
-            before_expected = _compact_json_loads(item.before_json)
-            current_row = _load_target_row(db, target_table=target_table, project_id=project_id, target_id=target_id)
-            if isinstance(before_expected, dict):
-                current_dict = _row_payload(target_table, current_row) if current_row is not None else None
-                if current_dict != before_expected:
-                    warnings.append(
-                        {
-                            "code": "MEMORY_CONFLICT",
-                            "message": "Target changed since propose; applied anyway",
-                            "item_id": str(item.id),
-                            "target_table": target_table,
-                            "target_id": target_id,
-                        }
-                    )
-
-            if item.op == "delete":
-                if current_row is None:
-                    warnings.append(
-                        {
-                            "code": "MISSING_TARGET",
-                            "message": "Target not found during apply delete; skipped",
-                            "item_id": str(item.id),
-                            "target_table": target_table,
-                            "target_id": target_id,
-                        }
-                    )
-                    continue
-                if target_table == "project_table_rows":
-                    db.delete(current_row)
-                else:
-                    current_row.deleted_at = utc_now()  # type: ignore[attr-defined]
-                continue
-
-            after_value = _compact_json_loads(item.after_json)
-            if not isinstance(after_value, dict):
-                raise AppError.validation(details={"item_id": str(item.id), "reason": "after_json_invalid"})
-            _apply_upsert(db, target_table=target_table, project_id=project_id, target_id=target_id, after=after_value)
+        warnings = _apply_change_set_items(
+            db=db,
+            items=items,
+            project_id=project_id,
+            compact_json_loads_fn=_compact_json_loads,
+            load_target_row_fn=_load_target_row,
+            row_payload_fn=_row_payload,
+            apply_upsert_fn=_apply_upsert,
+            now_fn=utc_now,
+        )
 
         change_set.status = "applied"
         change_set.applied_at = utc_now()
@@ -899,30 +793,12 @@ def _ensure_memory_tasks(
     change_set_id: str,
     actor_user_id: str,
 ) -> list[MemoryTask]:
-    kinds = ["vector_rebuild", "graph_update", "fractal_rebuild"]
-    existing = (
-        db.execute(select(MemoryTask).where(MemoryTask.change_set_id == change_set_id).order_by(MemoryTask.kind.asc()))
-        .scalars()
-        .all()
+    return _ensure_memory_tasks_impl(
+        db=db,
+        project_id=project_id,
+        change_set_id=change_set_id,
+        actor_user_id=actor_user_id,
     )
-    by_kind = {str(t.kind): t for t in existing}
-
-    tasks: list[MemoryTask] = []
-    for kind in kinds:
-        row = by_kind.get(kind)
-        if row is None:
-            row = MemoryTask(
-                id=new_id(),
-                project_id=project_id,
-                change_set_id=change_set_id,
-                actor_user_id=actor_user_id,
-                kind=kind,
-                status="queued",
-            )
-            db.add(row)
-        tasks.append(row)
-    db.commit()
-    return tasks
 
 
 def _schedule_memory_tasks_after_apply(*, db: Session, request_id: str, actor_user_id: str, change_set: MemoryChangeSet) -> None:
@@ -932,51 +808,14 @@ def _schedule_memory_tasks_after_apply(*, db: Session, request_id: str, actor_us
     from app.services.task_queue import get_task_queue
 
     queue = get_task_queue()
-    for task in tasks:
-        if str(task.status) != "queued":
-            continue
-        try:
-            queue.enqueue(kind="memory_task", task_id=str(task.id))
-        except Exception as exc:
-            safe_message = redact_secrets_text(str(exc)).replace("\n", " ").strip()
-            if not safe_message:
-                safe_message = type(exc).__name__
-
-            if isinstance(exc, AppError):
-                details = exc.details if isinstance(exc.details, dict) else {}
-                error_payload = {
-                    "error_type": type(exc).__name__,
-                    "code": str(exc.code),
-                    "message": safe_message[:200],
-                    "details": redact_api_keys(details),
-                }
-            else:
-                error_payload = {"error_type": type(exc).__name__, "message": safe_message[:200]}
-
-            task.status = "failed"
-            task.finished_at = utc_now()
-            task.error_json = _compact_json_dumps(error_payload)
-            db.commit()
-            log_event(
-                logger,
-                "warning",
-                event="MEMORY_TASK_ENQUEUE_ERROR",
-                project_id=project_id,
-                change_set_id=str(change_set.id),
-                task_id=str(task.id),
-                kind=str(task.kind),
-                error_type=type(exc).__name__,
-            )
-            continue
-
-    log_event(
-        logger,
-        "info",
-        event="MEMORY_TASKS_ENQUEUED",
+    _enqueue_memory_tasks(
+        db=db,
+        logger=logger,
+        request_id=request_id,
         project_id=project_id,
         change_set_id=str(change_set.id),
-        tasks=[{"id": str(t.id), "kind": str(t.kind)} for t in tasks],
-        request_id=request_id,
+        tasks=tasks,
+        queue_enqueue_fn=queue.enqueue,
     )
 
 
@@ -1002,36 +841,19 @@ def run_memory_task(*, task_id: str) -> str:
         kind = str(task.kind)
         project_id = str(task.project_id)
 
-        result: dict[str, Any]
-        if kind == "graph_update":
-            result = {"skipped": True, "note": "graph context is computed on query; no rebuild required"}
-        elif kind == "fractal_rebuild":
-            if not bool(getattr(settings, "fractal_enabled", True)):
-                result = {"skipped": True, "disabled_reason": "disabled"}
-            else:
-                result = rebuild_fractal_memory(db=db, project_id=project_id, reason=f"memory_task:{task_id[:8]}")
-        elif kind == "vector_rebuild":
-            db2 = SessionLocal()
-            try:
-                embedding = vector_embedding_overrides(db2.get(ProjectSettings, project_id))
-                status = vector_rag_status(project_id=project_id, embedding=embedding)
-                if not bool(status.get("enabled")):
-                    result = {"skipped": True, **status}
-                else:
-                    chunks = build_project_chunks(db=db2, project_id=project_id)
-                    result = rebuild_project(project_id=project_id, chunks=chunks, embedding=embedding)
-                    if bool(result.get("enabled")) and not bool(result.get("skipped")):
-                        settings_row = db2.get(ProjectSettings, project_id)
-                        if settings_row is None:
-                            settings_row = ProjectSettings(project_id=project_id)
-                            db2.add(settings_row)
-                        settings_row.vector_index_dirty = False
-                        settings_row.last_vector_build_at = utc_now()
-                        db2.commit()
-            finally:
-                db2.close()
-        else:
-            raise ValueError(f"Unsupported MemoryTask.kind: {kind!r}")
+        result = _run_memory_task_kind(
+            kind=kind,
+            task_id=task_id,
+            project_id=project_id,
+            db=db,
+            session_factory=SessionLocal,
+            rebuild_fractal_memory_fn=rebuild_fractal_memory,
+            vector_embedding_overrides_fn=vector_embedding_overrides,
+            vector_rag_status_fn=vector_rag_status,
+            build_project_chunks_fn=build_project_chunks,
+            rebuild_project_fn=rebuild_project,
+            project_settings_model=ProjectSettings,
+        )
 
         task.status = "succeeded"
         task.result_json = _compact_json_dumps(result)
@@ -1051,23 +873,8 @@ def run_memory_task(*, task_id: str) -> str:
         try:
             task2 = db.get(MemoryTask, task_id)
             if task2 is not None:
-                safe_message = redact_secrets_text(str(exc)).replace("\n", " ").strip()
-                if not safe_message:
-                    safe_message = type(exc).__name__
-
-                if isinstance(exc, AppError):
-                    details = exc.details if isinstance(exc.details, dict) else {}
-                    error_payload = {
-                        "error_type": type(exc).__name__,
-                        "code": str(exc.code),
-                        "message": safe_message[:400],
-                        "details": redact_api_keys(details),
-                    }
-                else:
-                    error_payload = {"error_type": type(exc).__name__, "message": safe_message[:400]}
-
                 task2.status = "failed"
-                task2.error_json = _compact_json_dumps(error_payload)
+                task2.error_json = _compact_json_dumps(_build_memory_task_error_payload(exc, message_limit=400))
                 task2.finished_at = utc_now()
                 db.commit()
         except Exception:
@@ -1099,104 +906,21 @@ def rollback_memory_change_set(
     if change_set.status != "applied":
         raise AppError.conflict(details={"status": change_set.status})
 
-    items = (
-        db.execute(
-            select(MemoryChangeSetItem)
-            .where(MemoryChangeSetItem.change_set_id == change_set.id)
-            .order_by(MemoryChangeSetItem.item_index.desc())
-        )
-        .scalars()
-        .all()
-    )
+    items = _load_change_set_items(db=db, change_set_id=str(change_set.id), descending=True)
     if not items:
         raise AppError.validation(details={"reason": "no_items"})
 
-    warnings: list[dict[str, Any]] = []
     try:
-        for item in items:
-            target_table = str(item.target_table)
-            target_id = str(item.target_id or "")
-            if not target_id:
-                continue
-
-            before_value = _compact_json_loads(item.before_json)
-            current_row = _load_target_row(db, target_table=target_table, project_id=project_id, target_id=target_id)
-
-            if item.op == "delete":
-                if target_table == "project_table_rows":
-                    if not isinstance(before_value, dict):
-                        warnings.append(
-                            {
-                                "code": "MISSING_BEFORE",
-                                "message": "Missing before_json for table row rollback; skipped",
-                                "item_id": str(item.id),
-                                "target_table": target_table,
-                                "target_id": target_id,
-                            }
-                        )
-                        continue
-                    after_restore = dict(before_value)
-                    after_restore.pop("id", None)
-                    _apply_upsert(
-                        db,
-                        target_table=target_table,
-                        project_id=project_id,
-                        target_id=target_id,
-                        after=after_restore,
-                    )
-                    continue
-                if current_row is None:
-                    warnings.append(
-                        {
-                            "code": "MISSING_TARGET",
-                            "message": "Target not found during rollback delete; skipped",
-                            "item_id": str(item.id),
-                            "target_table": target_table,
-                            "target_id": target_id,
-                        }
-                    )
-                    continue
-                if isinstance(before_value, dict):
-                    current_row.deleted_at = _parse_dt(before_value.get("deleted_at"))  # type: ignore[attr-defined]
-                else:
-                    current_row.deleted_at = None  # type: ignore[attr-defined]
-                continue
-
-            # upsert rollback
-            if current_row is None:
-                warnings.append(
-                    {
-                        "code": "MISSING_TARGET",
-                        "message": "Target not found during rollback upsert; skipped",
-                        "item_id": str(item.id),
-                        "target_table": target_table,
-                        "target_id": target_id,
-                    }
-                )
-                continue
-
-            if not isinstance(before_value, dict):
-                if target_table == "project_table_rows":
-                    db.delete(current_row)
-                else:
-                    # Created during apply: soft-delete it.
-                    current_row.deleted_at = utc_now()  # type: ignore[attr-defined]
-                continue
-
-            # Restore fields.
-            after_restore = dict(before_value)
-            after_restore.pop("id", None)
-            if target_table != "project_table_rows":
-                after_restore["deleted_at"] = before_value.get("deleted_at")
-            _apply_upsert(
-                db,
-                target_table=target_table,
-                project_id=project_id,
-                target_id=target_id,
-                after=after_restore,
-            )
-            if target_table != "project_table_rows":
-                current_row.deleted_at = _parse_dt(before_value.get("deleted_at"))  # type: ignore[attr-defined]
+        warnings = _rollback_change_set_items(
+            db=db,
+            items=items,
+            project_id=project_id,
+            compact_json_loads_fn=_compact_json_loads,
+            load_target_row_fn=_load_target_row,
+            apply_upsert_fn=_apply_upsert,
+            parse_dt_fn=_parse_dt,
+            now_fn=utc_now,
+        )
 
         change_set.status = "rolled_back"
         change_set.rolled_back_at = utc_now()

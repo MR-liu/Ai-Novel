@@ -1,5 +1,3 @@
-import { pinyin } from "pinyin-pro";
-
 export type PinyinMatchMode = "pinyin_full" | "pinyin_initials";
 
 export type PinyinMatchResult = {
@@ -10,8 +8,12 @@ export type PinyinMatchResult = {
 type PinyinIndex = { full: string; initials: string };
 
 const PINYIN_INDEX_CACHE = new Map<string, PinyinIndex>();
+type PinyinFn = (text: string, options?: Record<string, unknown>) => string;
 
-function hasChinese(text: string): boolean {
+let pinyinFn: PinyinFn | null = null;
+let pinyinLoader: Promise<PinyinFn | null> | null = null;
+
+export function hasChineseText(text: string): boolean {
   return /[\u3400-\u9fff]/.test(text);
 }
 
@@ -35,17 +37,46 @@ export function looksLikePinyinToken(token: string): boolean {
   return /[a-z]/i.test(token);
 }
 
+export function isPinyinSupportReady(): boolean {
+  return pinyinFn !== null;
+}
+
+export function shouldPreloadPinyinSupport(tokens: string[], texts: Iterable<string>): boolean {
+  if (!tokens.some(looksLikePinyinToken)) return false;
+  for (const text of texts) {
+    if (hasChineseText(text)) return true;
+  }
+  return false;
+}
+
+export async function preloadPinyinSupport(): Promise<boolean> {
+  if (pinyinFn) return true;
+  if (!pinyinLoader) {
+    pinyinLoader = import("pinyin-pro")
+      .then((mod) => {
+        pinyinFn = mod.pinyin;
+        return pinyinFn;
+      })
+      .catch(() => null)
+      .finally(() => {
+        pinyinLoader = null;
+      });
+  }
+  return Boolean(await pinyinLoader);
+}
+
 export function getPinyinIndex(text: string): PinyinIndex | null {
   const key = String(text || "");
   if (!key) return { full: "", initials: "" };
-  if (!hasChinese(key)) return null;
+  if (!hasChineseText(key)) return null;
+  if (!pinyinFn) return null;
 
   const cached = PINYIN_INDEX_CACHE.get(key);
   if (cached) return cached;
 
   try {
     const full = normalizeAsciiToken(
-      pinyin(key, {
+      pinyinFn(key, {
         toneType: "none",
         separator: "",
         nonZh: "removed",
@@ -53,7 +84,7 @@ export function getPinyinIndex(text: string): PinyinIndex | null {
       }),
     );
     const initials = normalizeAsciiToken(
-      pinyin(key, {
+      pinyinFn(key, {
         toneType: "none",
         pattern: "first",
         separator: "",

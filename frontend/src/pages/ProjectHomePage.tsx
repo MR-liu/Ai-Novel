@@ -15,8 +15,10 @@ import {
   PROJECT_HOME_TAB_COPY,
   PROJECT_HOME_TABS,
 } from "./authorWorkbenchModels";
-import { ProjectWizardPage } from "./ProjectWizardPage";
-import { SettingsPage } from "./SettingsPage";
+import { lazyPage, PageContentLoader } from "./lazyPage";
+
+const LazyProjectWizardPage = lazyPage(() => import("./ProjectWizardPage"), (mod) => mod.ProjectWizardPage);
+const LazySettingsPage = lazyPage(() => import("./SettingsPage"), (mod) => mod.SettingsPage);
 
 function formatDateLabel(value: string | null | undefined): string {
   if (!value) return "暂无更新";
@@ -222,9 +224,11 @@ export function ProjectHomePage() {
           </div>
         </section>
       ) : null}
-      {currentTab === "overview" ? <ProjectHomeOverview projectId={projectId} /> : null}
-      {currentTab === "setup" ? <ProjectWizardPage /> : null}
-      {currentTab === "settings" ? <SettingsPage /> : null}
+      <PageContentLoader>
+        {currentTab === "overview" ? <ProjectHomeOverview projectId={projectId} /> : null}
+        {currentTab === "setup" ? <LazyProjectWizardPage /> : null}
+        {currentTab === "settings" ? <LazySettingsPage /> : null}
+      </PageContentLoader>
     </div>
   );
 }

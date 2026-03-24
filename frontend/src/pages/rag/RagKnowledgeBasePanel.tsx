@@ -1,8 +1,8 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { Badge } from "../../components/ui/Badge";
 import { FeedbackCallout, FeedbackEmptyState } from "../../components/ui/Feedback";
-import { containsPinyinMatch, looksLikePinyinToken, tokenizeSearch } from "../../lib/pinyin";
+import { containsPinyinMatch, preloadPinyinSupport, shouldPreloadPinyinSupport, tokenizeSearch } from "../../lib/pinyin";
 import type { KnowledgeBase, VectorRagResult } from "./types";
 
 function highlightText(text: string, tokens: string[]): ReactNode {
@@ -98,7 +98,31 @@ export function RagKnowledgeBasePanel(props: {
   } = props;
 
   const [kbSearchText, setKbSearchText] = useState("");
+  const [pinyinVersion, setPinyinVersion] = useState(0);
   const kbTokens = useMemo(() => tokenizeSearch(kbSearchText), [kbSearchText]);
+
+  useEffect(() => {
+    if (
+      !shouldPreloadPinyinSupport(
+        kbTokens,
+        kbs.map((kb) => {
+          const draft = kbDraftById[kb.kb_id] ?? { name: kb.name };
+          return `${kb.kb_id} ${draft.name ?? ""}`;
+        }),
+      )
+    ) {
+      return;
+    }
+    let cancelled = false;
+    void preloadPinyinSupport().then((loaded) => {
+      if (!cancelled && loaded) {
+        setPinyinVersion((prev) => prev + 1);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [kbDraftById, kbTokens, kbs]);
 
   const kbSearchMeta = useMemo(() => {
     const tokens = kbTokens;
@@ -115,7 +139,6 @@ export function RagKnowledgeBasePanel(props: {
       const ok = tokens.every((t) => {
         if (haystackId.includes(t)) return true;
         if (haystackName.includes(t)) return true;
-        if (!looksLikePinyinToken(t)) return false;
         const m = containsPinyinMatch(combined, t);
         if (!m.matched) return false;
         pinyinHit = true;
@@ -126,7 +149,7 @@ export function RagKnowledgeBasePanel(props: {
     });
 
     return { list, metaById, tokens };
-  }, [kbDraftById, kbTokens, kbs]);
+  }, [kbDraftById, kbTokens, kbs, pinyinVersion]);
 
   const filteredKbs = kbSearchMeta.list;
   const enabledCount = kbs.filter((kb) => Boolean((kbDraftById[kb.kb_id] ?? kb).enabled)).length;

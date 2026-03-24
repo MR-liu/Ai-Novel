@@ -5,10 +5,12 @@ import { StudioWorkbenchPanel } from "../components/layout/StudioWorkbenchPanel"
 import { useAppMode } from "../contexts/AppModeContext";
 import { buildProjectReviewPath, buildProjectWritePath, buildStudioSystemPath, type StudioSystemTab } from "../lib/projectRoutes";
 
-import { FractalPage } from "./FractalPage";
-import { StructuredMemoryPage } from "./StructuredMemoryPage";
-import { TaskCenterPage } from "./TaskCenterPage";
+import { lazyPage, PageContentLoader } from "./lazyPage";
 import { STUDIO_SYSTEM_TAB_COPY, STUDIO_SYSTEM_TABS } from "./studioWorkbenchModels";
+
+const LazyFractalPage = lazyPage(() => import("./FractalPage"), (mod) => mod.FractalPage);
+const LazyStructuredMemoryPage = lazyPage(() => import("./StructuredMemoryPage"), (mod) => mod.StructuredMemoryPage);
+const LazyTaskCenterPage = lazyPage(() => import("./TaskCenterPage"), (mod) => mod.TaskCenterPage);
 
 export function StudioSystemPage() {
   const { mode } = useAppMode();
@@ -81,9 +83,11 @@ export function StudioSystemPage() {
           </>
         }
       />
-      {currentTab === "tasks" ? <TaskCenterPage /> : null}
-      {currentTab === "structured-memory" ? <StructuredMemoryPage /> : null}
-      {currentTab === "fractal" ? <FractalPage /> : null}
+      <PageContentLoader>
+        {currentTab === "tasks" ? <LazyTaskCenterPage /> : null}
+        {currentTab === "structured-memory" ? <LazyStructuredMemoryPage /> : null}
+        {currentTab === "fractal" ? <LazyFractalPage /> : null}
+      </PageContentLoader>
     </div>
   );
 }

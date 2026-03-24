@@ -6,9 +6,8 @@ import math
 import logging
 import re
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
@@ -18,38 +17,42 @@ from app.core.config import settings
 from app.core.logging import exception_log_fields, log_event
 from app.db.session import SessionLocal, engine
 from app.db.utils import new_id, utc_now
-from app.models.chapter import Chapter
-from app.models.outline import Outline
 from app.models.project_settings import ProjectSettings
 from app.models.project_task import ProjectTask
-from app.models.story_memory import StoryMemory
-from app.models.worldbook_entry import WorldBookEntry
 from app.services.project_task_event_service import emit_and_enqueue_project_task, reset_project_task_to_queued
-from app.services.context_budget_observability import build_budget_observability
 from app.services.embedding_service import (
     embed_texts as embed_texts_with_providers,
     embedding_enabled_reason,
     resolve_embedding_config,
 )
+from app.services.vector_backend_flow import (
+    VectorBackendHooks,
+    ingest_chunks_via_backend as _ingest_chunks_via_backend,
+    purge_project_vectors_via_backend as _purge_project_vectors_via_backend,
+    rebuild_project_via_backend as _rebuild_project_via_backend,
+)
+from app.services.vector_chunk_builder import build_project_chunks as _build_project_chunks
+from app.services.vector_models import ALL_VECTOR_SOURCES, VectorChunk, VectorSource
+from app.services.vector_postprocess_flow import (
+    build_vector_budget_observability as _build_vector_budget_observability_impl,
+    build_vector_query_counts as _build_vector_query_counts_impl,
+    parse_vector_source_order as _parse_vector_source_order_impl,
+    parse_vector_source_weights as _parse_vector_source_weights_impl,
+    super_sort_final_chunks as _super_sort_final_chunks_impl,
+)
 from app.services.vector_query_flow import (
     apply_vector_rerank as _apply_vector_rerank,
     finalize_vector_query_candidates as _finalize_vector_query_candidates,
 )
+from app.services.vector_status_flow import (
+    build_vector_status_payload as _build_vector_status_payload,
+    resolve_rerank_config as _resolve_rerank_config_impl,
+    resolve_rerank_external_config as _resolve_rerank_external_config_impl,
+)
 from app.services.rerank_service import rerank_candidates as rerank_candidates_with_providers
 
 logger = logging.getLogger("ainovel")
-
-VectorSource = Literal["worldbook", "outline", "chapter", "story_memory"]
-
-
-@dataclass(frozen=True, slots=True)
-class VectorChunk:
-    id: str
-    text: str
-    metadata: dict[str, Any]
-
-
-_ALL_SOURCES: list[VectorSource] = ["worldbook", "outline", "chapter", "story_memory"]
+_ALL_SOURCES: list[VectorSource] = list(ALL_VECTOR_SOURCES)
 _PGVECTOR_TABLE = "vector_chunks"
 _PGVECTOR_READY_CACHE: tuple[bool, float] | None = None
 _PGVECTOR_READY_CACHE_TTL_SECONDS = 30.0
@@ -364,189 +367,17 @@ def _merge_kb_candidates(
 
 
 def _parse_vector_source_order() -> list[str] | None:
-    raw = str(getattr(settings, "vector_source_order", "") or "").strip()
-    if not raw:
-        return None
-    parts = [p.strip().lower() for p in re.split(r"[\\s,|;]+", raw) if p.strip()]
-    out: list[str] = []
-    for p in parts:
-        if p not in _ALL_SOURCES:
-            continue
-        if p in out:
-            continue
-        out.append(p)
-    return out or None
+    return _parse_vector_source_order_impl(all_sources=list(_ALL_SOURCES))
 
 
 def _parse_vector_source_weights() -> dict[str, float] | None:
-    raw = str(getattr(settings, "vector_source_weights_json", "") or "").strip()
-    if not raw:
-        return None
-    try:
-        value = json.loads(raw)
-    except Exception:
-        return None
-    if not isinstance(value, dict):
-        return None
-    out: dict[str, float] = {}
-    for k, v in value.items():
-        source = str(k or "").strip().lower()
-        if source not in _ALL_SOURCES:
-            continue
-        try:
-            weight = float(v)
-        except Exception:
-            continue
-        if weight <= 0:
-            continue
-        out[source] = weight
-    return out or None
+    return _parse_vector_source_weights_impl(all_sources=list(_ALL_SOURCES))
 
 
 def _super_sort_final_chunks(
     final_chunks: list[dict[str, Any]], *, super_sort: dict[str, Any] | None = None
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    before_ids = [str(c.get("id") or "") for c in final_chunks if isinstance(c, dict)]
-
-    requested = super_sort if isinstance(super_sort, dict) else None
-
-    override_enabled: bool | None = None
-    override_order: list[str] | None = None
-    override_weights: dict[str, float] | None = None
-
-    if requested is not None:
-        if "enabled" in requested:
-            override_enabled = bool(requested.get("enabled"))
-
-        raw_order = requested.get("source_order")
-        if isinstance(raw_order, str):
-            parts = [p.strip().lower() for p in re.split(r"[\\s,|;]+", raw_order) if p.strip()]
-        elif isinstance(raw_order, list):
-            parts = [str(p or "").strip().lower() for p in raw_order if str(p or "").strip()]
-        else:
-            parts = []
-        if parts:
-            order: list[str] = []
-            for p in parts:
-                if p not in _ALL_SOURCES:
-                    continue
-                if p in order:
-                    continue
-                order.append(p)
-            override_order = order or None
-
-        raw_weights = requested.get("source_weights")
-        if isinstance(raw_weights, dict):
-            out: dict[str, float] = {}
-            for k, v in raw_weights.items():
-                source = str(k or "").strip().lower()
-                if source not in _ALL_SOURCES:
-                    continue
-                try:
-                    weight = float(v)
-                except Exception:
-                    continue
-                if weight <= 0:
-                    continue
-                out[source] = weight
-            override_weights = out or None
-
-    order_cfg = override_order if override_order is not None else _parse_vector_source_order()
-    weights_cfg = override_weights if override_weights is not None else _parse_vector_source_weights()
-    enabled = bool(order_cfg or weights_cfg)
-    if override_enabled is False:
-        enabled = False
-
-    base_obs: dict[str, Any] = {
-        "enabled": bool(enabled),
-        "applied": False,
-        "reason": "disabled" if not enabled else None,
-        "override_enabled": override_enabled,
-        "requested": requested,
-        "source_order": order_cfg,
-        "source_weights": weights_cfg,
-        "before": before_ids,
-        "after": list(before_ids),
-    }
-    if not enabled or len(final_chunks) <= 1:
-        if enabled:
-            base_obs["reason"] = "noop"
-        return list(final_chunks), base_obs
-
-    if order_cfg:
-        order = list(order_cfg)
-        for s in _ALL_SOURCES:
-            if s not in order:
-                order.append(s)
-    else:
-        weights_for_sort = weights_cfg or {}
-        order = sorted(_ALL_SOURCES, key=lambda s: (-float(weights_for_sort.get(s, 1.0)), s))
-
-    weights_for_all = {s: float((weights_cfg or {}).get(s, 1.0)) for s in _ALL_SOURCES}
-    order_index = {s: i for i, s in enumerate(order)}
-
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for c in final_chunks:
-        if not isinstance(c, dict):
-            continue
-        meta = c.get("metadata") if isinstance(c.get("metadata"), dict) else {}
-        source = str(meta.get("source") or "")
-        grouped.setdefault(source, []).append(c)
-
-    def _natural_key(source: str, c: dict[str, Any]) -> tuple:
-        meta = c.get("metadata") if isinstance(c.get("metadata"), dict) else {}
-        try:
-            chunk_index = int(meta.get("chunk_index") or 0)
-        except Exception:
-            chunk_index = 0
-        source_id = str(meta.get("source_id") or "")
-        cid = str(c.get("id") or "")
-        if source == "chapter":
-            try:
-                chapter_number = int(meta.get("chapter_number") or 0)
-            except Exception:
-                chapter_number = 0
-            return (chapter_number, chunk_index, source_id, cid)
-        title = str(meta.get("title") or "")
-        return (title, chunk_index, source_id, cid)
-
-    for source, items in grouped.items():
-        items.sort(key=lambda c: _natural_key(source, c))
-
-    pos = {s: 0 for s in grouped.keys()}
-    taken = {s: 0 for s in grouped.keys()}
-
-    out: list[dict[str, Any]] = []
-    while True:
-        available = [s for s in grouped.keys() if pos.get(s, 0) < len(grouped[s])]
-        if not available:
-            break
-
-        def _pick_key(s: str) -> tuple[float, int, str]:
-            weight = float(weights_for_all.get(s, 1.0))
-            if weight <= 0:
-                weight = 1.0
-            ratio = float(taken.get(s, 0)) / weight
-            return (ratio, int(order_index.get(s, 999)), s)
-
-        selected_source = min(available, key=_pick_key)
-        out.append(grouped[selected_source][pos[selected_source]])
-        pos[selected_source] = int(pos.get(selected_source, 0)) + 1
-        taken[selected_source] = int(taken.get(selected_source, 0)) + 1
-
-    after_ids = [str(c.get("id") or "") for c in out if isinstance(c, dict)]
-    obs = dict(base_obs)
-    obs.update(
-        {
-            "applied": after_ids != before_ids,
-            "reason": "ok",
-            "source_order_effective": order,
-            "source_weights_effective": weights_for_all,
-            "after": after_ids,
-            "by_source": {s: len(grouped[s]) for s in sorted(grouped.keys())},
-        }
-    )
-    return out, obs
+    return _super_sort_final_chunks_impl(final_chunks, all_sources=list(_ALL_SOURCES), super_sort=super_sort)
 
 
 def _build_vector_query_counts(
@@ -556,28 +387,13 @@ def _build_vector_query_counts(
     final_selected: int,
     dropped: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    unique_keys: set[tuple[str, str]] = set()
-    for c in returned_candidates:
-        if isinstance(c, dict):
-            unique_keys.add(_vector_candidate_key(c))
-
-    dropped_by_reason: dict[str, int] = {}
-    for d in dropped:
-        if not isinstance(d, dict):
-            continue
-        reason = str(d.get("reason") or "")
-        if not reason:
-            continue
-        dropped_by_reason[reason] = dropped_by_reason.get(reason, 0) + 1
-
-    return {
-        "candidates_total": int(candidates_total),
-        "candidates_returned": int(len(returned_candidates)),
-        "unique_sources": int(len(unique_keys)),
-        "final_selected": int(final_selected),
-        "dropped_total": int(len(dropped)),
-        "dropped_by_reason": dropped_by_reason,
-    }
+    return _build_vector_query_counts_impl(
+        candidates_total=candidates_total,
+        returned_candidates=returned_candidates,
+        final_selected=final_selected,
+        dropped=dropped,
+        candidate_key_fn=_vector_candidate_key,
+    )
 
 
 def _vector_budget_observability(
@@ -588,14 +404,11 @@ def _vector_budget_observability(
     char_limit: int,
     dropped: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    return build_budget_observability(
-        module="vector",
-        limits={
-            "max_candidates": int(top_k),
-            "final_max_chunks": int(max_chunks),
-            "per_source_max_chunks": int(per_source_max_chunks),
-            "final_char_limit": int(char_limit),
-        },
+    return _build_vector_budget_observability_impl(
+        top_k=top_k,
+        max_chunks=max_chunks,
+        per_source_max_chunks=per_source_max_chunks,
+        char_limit=char_limit,
         dropped=dropped,
         reason_explain=_VECTOR_DROPPED_REASON_EXPLAIN,
     )
@@ -615,61 +428,11 @@ def _vector_enabled_reason(*, embedding: dict[str, str | None] | None = None) ->
 
 
 def _resolve_rerank_config(rerank: dict[str, Any] | None) -> tuple[bool, str, int, float]:
-    enabled = bool(getattr(settings, "vector_rerank_enabled", False))
-    method = "auto"
-    top_k = int(getattr(settings, "vector_max_candidates", 20) or 20)
-    hybrid_alpha = 0.0
-    if rerank is None:
-        return enabled, method, max(1, min(int(top_k), 1000)), float(hybrid_alpha)
-
-    if "enabled" in rerank:
-        enabled = bool(rerank.get("enabled"))
-    raw_method = str(rerank.get("method") or "").strip()
-    if raw_method:
-        method = raw_method
-
-    provider_raw = str(rerank.get("provider") or "").strip()
-    if method == "auto" and provider_raw == "external_rerank_api":
-        method = "external_rerank_api"
-    if "top_k" in rerank and rerank.get("top_k") is not None:
-        try:
-            top_k = int(rerank.get("top_k"))
-        except Exception:
-            pass
-    if "hybrid_alpha" in rerank and rerank.get("hybrid_alpha") is not None:
-        try:
-            hybrid_alpha = float(rerank.get("hybrid_alpha"))
-        except Exception:
-            hybrid_alpha = 0.0
-    hybrid_alpha = max(0.0, min(float(hybrid_alpha), 1.0))
-    return enabled, method, max(1, min(int(top_k), 1000)), float(hybrid_alpha)
+    return _resolve_rerank_config_impl(rerank)
 
 
 def _resolve_rerank_external_config(rerank: dict[str, Any] | None) -> dict[str, Any] | None:
-    if rerank is None:
-        return None
-    if not isinstance(rerank, dict):
-        return None
-
-    out: dict[str, Any] = {}
-
-    base_url = str(rerank.get("base_url") or "").strip()
-    if base_url:
-        out["base_url"] = base_url
-
-    model = str(rerank.get("model") or "").strip()
-    if model:
-        out["model"] = model
-
-    api_key = str(rerank.get("api_key") or "").strip()
-    if api_key:
-        out["api_key"] = api_key
-
-    timeout_seconds = rerank.get("timeout_seconds")
-    if timeout_seconds is not None:
-        out["timeout_seconds"] = timeout_seconds
-
-    return out or None
+    return _resolve_rerank_external_config_impl(rerank)
 
 
 def vector_rag_status(
@@ -681,69 +444,20 @@ def vector_rag_status(
 ) -> dict[str, Any]:
     sources = sources or list(_ALL_SOURCES)
     enabled, disabled_reason = _vector_enabled_reason(embedding=embedding)
-    rerank_enabled, rerank_method, rerank_top_k, rerank_hybrid_alpha = _resolve_rerank_config(rerank)
-    rerank_external = _resolve_rerank_external_config(rerank)
-    rerank_provider: str | None = None
-    rerank_model: str | None = None
-    rerank_method_effective: str | None = None
-    if rerank_enabled:
-        rerank_method_effective = str(rerank_method or "").strip() or None
-        if rerank_method_effective == "external_rerank_api":
-            rerank_provider = "external_rerank_api"
-            rerank_model_raw = (rerank_external or {}).get("model")
-            rerank_model = str(rerank_model_raw or "").strip() or None
-        else:
-            rerank_provider = "local"
-            rerank_model = None
-    rerank_obs = {
-        "enabled": bool(rerank_enabled),
-        "applied": False,
-        "requested_method": rerank_method,
-        "method": rerank_method_effective,
-        "provider": rerank_provider,
-        "model": rerank_model,
-        "top_k": int(rerank_top_k),
-        "hybrid_alpha": float(rerank_hybrid_alpha),
-        "hybrid_applied": False,
-        "after_rerank": [],
-        "reason": "disabled" if not rerank_enabled else "status_only",
-        "error_type": None,
-        "before": [],
-        "after": [],
-        "timing_ms": 0,
-        "errors": [],
-    }
-    if not enabled:
-        return {
-            "enabled": False,
-            "disabled_reason": disabled_reason,
-            "query_text": "",
-            "filters": {"project_id": project_id, "sources": sources},
-            "timings_ms": {"rerank": 0},
-            "candidates": [],
-            "final": {"chunks": [], "text_md": "", "truncated": False},
-            "dropped": [],
-            "counts": _build_vector_query_counts(candidates_total=0, returned_candidates=[], final_selected=0, dropped=[]),
-            "prompt_block": {"identifier": "sys.memory.vector_rag", "role": "system", "text_md": ""},
-            "backend_preferred": "pgvector" if _prefer_pgvector() else "chroma",
-            "hybrid_enabled": bool(getattr(settings, "vector_hybrid_enabled", True)),
-            "rerank": rerank_obs,
-        }
-    return {
-        "enabled": True,
-        "disabled_reason": None,
-        "query_text": "",
-        "filters": {"project_id": project_id, "sources": sources},
-        "timings_ms": {"rerank": 0},
-        "candidates": [],
-        "final": {"chunks": [], "text_md": "", "truncated": False},
-        "dropped": [],
-        "counts": _build_vector_query_counts(candidates_total=0, returned_candidates=[], final_selected=0, dropped=[]),
-        "prompt_block": {"identifier": "sys.memory.vector_rag", "role": "system", "text_md": ""},
-        "backend_preferred": "pgvector" if _prefer_pgvector() else "chroma",
-        "hybrid_enabled": bool(getattr(settings, "vector_hybrid_enabled", True)),
-        "rerank": rerank_obs,
-    }
+    return _build_vector_status_payload(
+        project_id=project_id,
+        sources=sources,
+        enabled=enabled,
+        disabled_reason=disabled_reason,
+        rerank=rerank,
+        build_counts_fn=lambda **kwargs: _build_vector_query_counts(
+            candidates_total=kwargs["candidates_total"],
+            returned_candidates=kwargs["returned_candidates"],
+            final_selected=kwargs["final_selected"],
+            dropped=kwargs["dropped"],
+        ),
+        prefer_pgvector_fn=_prefer_pgvector,
+    )
 
 
 def schedule_vector_rebuild_task(
@@ -1173,151 +887,8 @@ def _get_collection(*, project_id: str, kb_id: str | None = None):
         return legacy_collection
 
 
-def _chunk_text(text: str, *, chunk_size: int, overlap: int) -> list[str]:
-    s = (text or "").strip()
-    if not s:
-        return []
-    if chunk_size <= 0:
-        return [s]
-
-    out: list[str] = []
-    start = 0
-    overlap = max(0, min(int(overlap), int(chunk_size) - 1)) if chunk_size > 1 else 0
-    while start < len(s):
-        end = min(len(s), start + chunk_size)
-        piece = s[start:end].strip()
-        if piece:
-            out.append(piece)
-        if end >= len(s):
-            break
-        start = max(0, end - overlap)
-    return out
-
-
 def build_project_chunks(*, db: Session, project_id: str, sources: list[VectorSource] | None = None) -> list[VectorChunk]:
-    sources = sources or list(_ALL_SOURCES)
-    chunk_size = int(settings.vector_chunk_size or 800)
-    overlap = int(settings.vector_chunk_overlap or 120)
-
-    out: list[VectorChunk] = []
-
-    if "worldbook" in sources:
-        rows = (
-            db.execute(
-                select(WorldBookEntry)
-                .where(WorldBookEntry.project_id == project_id)
-                .where(WorldBookEntry.enabled == True)  # noqa: E712
-                .order_by(WorldBookEntry.updated_at.desc())
-            )
-            .scalars()
-            .all()
-        )
-        for e in rows:
-            title = (e.title or "").strip()
-            content = (e.content_md or "").strip()
-            text = f"{title}\n\n{content}".strip()
-            for idx, chunk in enumerate(_chunk_text(text, chunk_size=chunk_size, overlap=overlap)):
-                out.append(
-                    VectorChunk(
-                        id=f"worldbook:{e.id}:{idx}",
-                        text=chunk,
-                        metadata={
-                            "project_id": project_id,
-                            "source": "worldbook",
-                            "source_id": e.id,
-                            "title": title,
-                            "chunk_index": idx,
-                        },
-                    )
-                )
-
-    if "outline" in sources:
-        rows = (
-            db.execute(select(Outline).where(Outline.project_id == project_id).order_by(Outline.updated_at.desc()))
-            .scalars()
-            .all()
-        )
-        for o in rows:
-            title = (o.title or "").strip()
-            content = (o.content_md or "").strip()
-            text = f"{title}\n\n{content}".strip()
-            for idx, chunk in enumerate(_chunk_text(text, chunk_size=chunk_size, overlap=overlap)):
-                out.append(
-                    VectorChunk(
-                        id=f"outline:{o.id}:{idx}",
-                        text=chunk,
-                        metadata={
-                            "project_id": project_id,
-                            "source": "outline",
-                            "source_id": o.id,
-                            "title": title,
-                            "chunk_index": idx,
-                        },
-                    )
-                )
-
-    if "chapter" in sources:
-        rows = (
-            db.execute(select(Chapter).where(Chapter.project_id == project_id).order_by(Chapter.updated_at.desc()))
-            .scalars()
-            .all()
-        )
-        for c in rows:
-            title = (c.title or "").strip()
-            content = (c.content_md or "").strip()
-            if not content:
-                continue
-            header = f"第 {int(c.number)} 章：{title}".strip("：")
-            text = f"{header}\n\n{content}".strip()
-            for idx, chunk in enumerate(_chunk_text(text, chunk_size=chunk_size, overlap=overlap)):
-                out.append(
-                    VectorChunk(
-                        id=f"chapter:{c.id}:{idx}",
-                        text=chunk,
-                        metadata={
-                            "project_id": project_id,
-                            "source": "chapter",
-                            "source_id": c.id,
-                            "chapter_number": int(c.number),
-                            "title": title,
-                            "chunk_index": idx,
-                        },
-                    )
-                )
-
-    if "story_memory" in sources:
-        rows = (
-            db.execute(select(StoryMemory).where(StoryMemory.project_id == project_id).order_by(StoryMemory.updated_at.desc()))
-            .scalars()
-            .all()
-        )
-        for m in rows:
-            title = (m.title or "").strip()
-            content = (m.content or "").strip()
-            if not content:
-                continue
-            header = f"[{str(m.memory_type or '').strip() or 'story_memory'}] {title}".strip()
-            text = f"{header}\n\n{content}".strip() if header else content
-            for idx, chunk in enumerate(_chunk_text(text, chunk_size=chunk_size, overlap=overlap)):
-                out.append(
-                    VectorChunk(
-                        id=f"story_memory:{m.id}:{idx}",
-                        text=chunk,
-                        metadata={
-                            "project_id": project_id,
-                            "source": "story_memory",
-                            "source_id": m.id,
-                            "title": title,
-                            "chunk_index": idx,
-                            "memory_type": str(m.memory_type or "").strip(),
-                            "chapter_id": str(m.chapter_id or "") or None,
-                            "story_timeline": int(m.story_timeline or 0),
-                            "is_foreshadow": bool(int(m.is_foreshadow or 0)),
-                        },
-                    )
-                )
-
-    return out
+    return _build_project_chunks(db=db, project_id=project_id, sources=sources)
 
 
 def _pgvector_upsert_chunks(*, project_id: str, chunks: list[VectorChunk], embeddings: list[list[float]]) -> dict[str, Any]:
@@ -1593,6 +1164,22 @@ def _pgvector_hybrid_query(*, project_id: str, query_text: str, query_vec: list[
     }
 
 
+def _vector_backend_hooks() -> VectorBackendHooks:
+    return VectorBackendHooks(
+        vector_enabled_reason=_vector_enabled_reason,
+        prefer_pgvector=_prefer_pgvector,
+        pgvector_upsert_chunks=_pgvector_upsert_chunks,
+        pgvector_delete_project=_pgvector_delete_project,
+        get_collection=_get_collection,
+        import_chromadb=_import_chromadb,
+        default_chroma_persist_dir=_default_chroma_persist_dir,
+        normalize_kb_id=_normalize_kb_id,
+        legacy_collection_name=_legacy_collection_name,
+        hash_collection_name=_hash_collection_name,
+        chroma_collection_naming=_chroma_collection_naming,
+    )
+
+
 def ingest_chunks(
     *,
     project_id: str,
@@ -1600,88 +1187,13 @@ def ingest_chunks(
     chunks: list[VectorChunk],
     embedding: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
-    enabled, disabled_reason = _vector_enabled_reason(embedding=embedding)
-    if not enabled:
-        return {"enabled": False, "skipped": True, "disabled_reason": disabled_reason, "ingested": 0}
-
-    start = time.perf_counter()
-    texts = [c.text for c in chunks]
-    ids = [c.id for c in chunks]
-    metadatas = [c.metadata for c in chunks]
-
-    embeddings: list[list[float]] = []
-    if texts:
-        embed_out = embed_texts_with_providers(texts, embedding=embedding)
-        if not bool(embed_out.get("enabled")):
-            disabled = str(embed_out.get("disabled_reason") or "error")
-            log_event(
-                logger,
-                "warning",
-                event="VECTOR_RAG",
-                action="ingest",
-                project_id=project_id,
-                disabled_reason=disabled,
-                error_type="EmbeddingError",
-            )
-            return {
-                "enabled": False,
-                "skipped": True,
-                "disabled_reason": disabled,
-                "error": embed_out.get("error"),
-                "ingested": 0,
-            }
-        embeddings = embed_out.get("vectors") or []
-
-    embed_ms = int((time.perf_counter() - start) * 1000)
-
-    if _prefer_pgvector():
-        try:
-            write_start = time.perf_counter()
-            out = _pgvector_upsert_chunks(project_id=project_id, chunks=chunks, embeddings=embeddings)
-            write_ms = int((time.perf_counter() - write_start) * 1000)
-            log_event(
-                logger,
-                "info",
-                event="VECTOR_RAG",
-                action="ingest",
-                project_id=project_id,
-                chunks=len(chunks),
-                timings_ms={"embed": embed_ms, "upsert": write_ms},
-                backend="pgvector",
-            )
-            return {**out, "timings_ms": {"embed": embed_ms, "upsert": write_ms}, "backend": "pgvector"}
-        except Exception as exc:  # pragma: no cover - env dependent
-            log_event(
-                logger,
-                "warning",
-                event="VECTOR_RAG",
-                action="ingest",
-                project_id=project_id,
-                backend="pgvector",
-                fallback="chroma",
-                error_type=type(exc).__name__,
-            )
-
-    try:
-        collection = _get_collection(project_id=project_id, kb_id=kb_id)
-    except Exception as exc:  # pragma: no cover - env dependent
-        return {"enabled": False, "skipped": True, "disabled_reason": "chroma_unavailable", "error": str(exc), "ingested": 0}
-
-    write_start = time.perf_counter()
-    collection.upsert(ids=ids, documents=texts, metadatas=metadatas, embeddings=embeddings)
-    write_ms = int((time.perf_counter() - write_start) * 1000)
-
-    log_event(
-        logger,
-        "info",
-        event="VECTOR_RAG",
-        action="ingest",
+    return _ingest_chunks_via_backend(
         project_id=project_id,
-        chunks=len(chunks),
-        timings_ms={"embed": embed_ms, "upsert": write_ms},
-        backend="chroma",
+        kb_id=kb_id,
+        chunks=chunks,
+        embedding=embedding,
+        hooks=_vector_backend_hooks(),
     )
-    return {"enabled": True, "skipped": False, "ingested": len(chunks), "timings_ms": {"embed": embed_ms, "upsert": write_ms}, "backend": "chroma"}
 
 
 def rebuild_project(
@@ -1691,48 +1203,14 @@ def rebuild_project(
     chunks: list[VectorChunk],
     embedding: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
-    enabled, disabled_reason = _vector_enabled_reason(embedding=embedding)
-    if not enabled:
-        return {"enabled": False, "skipped": True, "disabled_reason": disabled_reason, "rebuilt": 0}
-
-    if _prefer_pgvector():
-        try:
-            _pgvector_delete_project(project_id=project_id)
-        except Exception as exc:  # pragma: no cover - env dependent
-            log_event(
-                logger,
-                "warning",
-                event="VECTOR_RAG",
-                action="rebuild",
-                project_id=project_id,
-                backend="pgvector",
-                error_type=type(exc).__name__,
-            )
-        out = ingest_chunks(project_id=project_id, kb_id=kb_id, chunks=chunks, embedding=embedding)
-        return {"enabled": bool(out.get("enabled")), "skipped": bool(out.get("skipped")), "rebuilt": int(out.get("ingested") or 0), **out}
-
-    try:
-        chromadb = _import_chromadb()
-        persist_dir = settings.vector_chroma_persist_dir or _default_chroma_persist_dir()
-        client = chromadb.PersistentClient(path=persist_dir)
-        kb = _normalize_kb_id(kb_id)
-        legacy_name = _legacy_collection_name(project_id)
-        hash_name = _hash_collection_name(project_id, kb)
-        naming = _chroma_collection_naming()
-        if kb != "default":
-            names = {hash_name}
-        else:
-            names = {legacy_name} if naming == "legacy" else {hash_name, legacy_name}
-        for name in names:
-            try:
-                client.delete_collection(name=name)
-            except Exception:
-                pass
-    except Exception as exc:  # pragma: no cover - env dependent
-        return {"enabled": False, "skipped": True, "disabled_reason": "chroma_unavailable", "error": str(exc), "rebuilt": 0}
-
-    out = ingest_chunks(project_id=project_id, kb_id=kb_id, chunks=chunks, embedding=embedding)
-    return {"enabled": bool(out.get("enabled")), "skipped": bool(out.get("skipped")), "rebuilt": int(out.get("ingested") or 0), **out}
+    return _rebuild_project_via_backend(
+        project_id=project_id,
+        kb_id=kb_id,
+        chunks=chunks,
+        embedding=embedding,
+        hooks=_vector_backend_hooks(),
+        ingest_chunks_fn=ingest_chunks,
+    )
 
 
 def purge_project_vectors(*, project_id: str, kb_id: str | None = None) -> dict[str, Any]:
@@ -1742,126 +1220,11 @@ def purge_project_vectors(*, project_id: str, kb_id: str | None = None) -> dict[
     - Postgres: delete rows in vector_chunks (pgvector backend).
     - SQLite: delete Chroma collection (if chromadb is installed).
     """
-    t0 = time.perf_counter()
-
-    if _prefer_pgvector():
-        try:
-            _pgvector_delete_project(project_id=project_id)
-            out = {"enabled": True, "skipped": False, "deleted": True, "backend": "pgvector"}
-            log_event(
-                logger,
-                "info",
-                event="VECTOR_RAG",
-                action="purge",
-                project_id=project_id,
-                backend="pgvector",
-                deleted=True,
-                timings_ms={"total": int((time.perf_counter() - t0) * 1000)},
-            )
-            out["timings_ms"] = {"total": int((time.perf_counter() - t0) * 1000)}
-            return out
-        except Exception as exc:  # pragma: no cover - env dependent
-            log_event(
-                logger,
-                "warning",
-                event="VECTOR_RAG",
-                action="purge",
-                project_id=project_id,
-                backend="pgvector",
-                deleted=False,
-                error_type=type(exc).__name__,
-                timings_ms={"total": int((time.perf_counter() - t0) * 1000)},
-            )
-            return {
-                "enabled": True,
-                "skipped": True,
-                "deleted": False,
-                "backend": "pgvector",
-                "error": str(exc),
-                "error_type": type(exc).__name__,
-                "timings_ms": {"total": int((time.perf_counter() - t0) * 1000)},
-            }
-
-    try:
-        chromadb = _import_chromadb()
-        persist_dir = settings.vector_chroma_persist_dir or _default_chroma_persist_dir()
-        client = chromadb.PersistentClient(path=persist_dir)
-        kb = _normalize_kb_id(kb_id)
-        names = [_hash_collection_name(project_id, kb)]
-        if kb == "default":
-            names.append(_legacy_collection_name(project_id))
-        delete_errors: list[str] = []
-        delete_error_type: str | None = None
-        deleted = True
-        for name in names:
-            try:
-                client.delete_collection(name=name)
-            except Exception as exc:  # pragma: no cover - env dependent
-                msg = str(exc)
-                msg_lower = msg.lower()
-                if "does not exist" in msg_lower or "not found" in msg_lower:
-                    continue
-                deleted = False
-                delete_errors.append(f"{name}: {msg}")
-                delete_error_type = delete_error_type or type(exc).__name__
-
-        error = "; ".join(delete_errors) if delete_errors else None
-        error_type = delete_error_type
-
-        out: dict[str, Any] = {
-            "enabled": True,
-            "skipped": False,
-            "deleted": bool(deleted),
-            "backend": "chroma",
-            "timings_ms": {"total": int((time.perf_counter() - t0) * 1000)},
-        }
-        if error:
-            out.update({"error": error, "error_type": error_type})
-            log_event(
-                logger,
-                "warning",
-                event="VECTOR_RAG",
-                action="purge",
-                project_id=project_id,
-                backend="chroma",
-                deleted=bool(deleted),
-                error_type=error_type,
-                timings_ms=out["timings_ms"],
-            )
-        else:
-            log_event(
-                logger,
-                "info",
-                event="VECTOR_RAG",
-                action="purge",
-                project_id=project_id,
-                backend="chroma",
-                deleted=True,
-                timings_ms=out["timings_ms"],
-            )
-        return out
-    except Exception as exc:  # pragma: no cover - env dependent
-        log_event(
-            logger,
-            "warning",
-            event="VECTOR_RAG",
-            action="purge",
-            project_id=project_id,
-            backend="chroma",
-            deleted=False,
-            error_type=type(exc).__name__,
-            timings_ms={"total": int((time.perf_counter() - t0) * 1000)},
-        )
-        return {
-            "enabled": False,
-            "skipped": True,
-            "deleted": False,
-            "backend": "chroma",
-            "disabled_reason": "chroma_unavailable",
-            "error": str(exc),
-            "error_type": type(exc).__name__,
-            "timings_ms": {"total": int((time.perf_counter() - t0) * 1000)},
-        }
+    return _purge_project_vectors_via_backend(
+        project_id=project_id,
+        kb_id=kb_id,
+        hooks=_vector_backend_hooks(),
+    )
 
 
 def _format_final_text(chunks: list[dict[str, Any]], *, char_limit: int) -> tuple[str, bool]:

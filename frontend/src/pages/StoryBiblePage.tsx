@@ -12,10 +12,12 @@ import {
   STORY_BIBLE_TAB_COPY,
   STORY_BIBLE_TABS,
 } from "./authorWorkbenchModels";
-import { CharactersPage } from "./CharactersPage";
-import { GlossaryPage } from "./GlossaryPage";
-import { NumericTablesPage } from "./NumericTablesPage";
-import { WorldBookPage } from "./WorldBookPage";
+import { lazyPage, PageContentLoader } from "./lazyPage";
+
+const LazyCharactersPage = lazyPage(() => import("./CharactersPage"), (mod) => mod.CharactersPage);
+const LazyGlossaryPage = lazyPage(() => import("./GlossaryPage"), (mod) => mod.GlossaryPage);
+const LazyNumericTablesPage = lazyPage(() => import("./NumericTablesPage"), (mod) => mod.NumericTablesPage);
+const LazyWorldBookPage = lazyPage(() => import("./WorldBookPage"), (mod) => mod.WorldBookPage);
 
 function StoryBibleOverview(props: { projectId: string }) {
   const { projects } = useProjects();
@@ -238,12 +240,14 @@ export function StoryBiblePage() {
           </div>
         </section>
       ) : null}
-      {currentTab === "overview" ? <StoryBibleOverview projectId={projectId} /> : null}
-      {currentTab === "characters" ? <CharactersPage /> : null}
-      {currentTab === "world" ? <WorldBookPage /> : null}
-      {currentTab === "glossary" ? <GlossaryPage /> : null}
-      {currentTab === "continuity" ? <ContinuityOverview projectId={projectId} /> : null}
-      {currentTab === "tables" ? <NumericTablesPage /> : null}
+      <PageContentLoader>
+        {currentTab === "overview" ? <StoryBibleOverview projectId={projectId} /> : null}
+        {currentTab === "characters" ? <LazyCharactersPage /> : null}
+        {currentTab === "world" ? <LazyWorldBookPage /> : null}
+        {currentTab === "glossary" ? <LazyGlossaryPage /> : null}
+        {currentTab === "continuity" ? <ContinuityOverview projectId={projectId} /> : null}
+        {currentTab === "tables" ? <LazyNumericTablesPage /> : null}
+      </PageContentLoader>
     </div>
   );
 }

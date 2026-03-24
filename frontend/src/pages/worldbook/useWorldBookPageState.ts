@@ -4,6 +4,7 @@ import { useParams } from "react-router-dom";
 import { useConfirm } from "../../components/ui/confirm";
 import { useToast } from "../../components/ui/toast";
 import { useProjectData } from "../../hooks/useProjectData";
+import { preloadPinyinSupport, shouldPreloadPinyinSupport, tokenizeSearch } from "../../lib/pinyin";
 import { UI_COPY } from "../../lib/uiCopy";
 import type { ApiError } from "../../services/apiClient";
 import {
@@ -92,6 +93,7 @@ export function useWorldBookPageState(): WorldBookPageState {
   const [form, setForm] = useState<WorldBookEntryForm>(() => toWorldBookEntryForm(null));
 
   const { searchText, setSearchText, sortMode, setSortMode } = useWorldBookFilters(projectId);
+  const [pinyinVersion, setPinyinVersion] = useState(0);
 
   const [bulkMode, setBulkMode] = useState(false);
   const [bulkSelectAllActive, setBulkSelectAllActive] = useState(false);
@@ -264,9 +266,30 @@ export function useWorldBookPageState(): WorldBookPageState {
     setBulkExcludedIds((prev) => prev.filter((id) => idSet.has(id)));
   }, [bulkExcludedIds.length, bulkMode, bulkSelectAllActive, bulkSelectedIds.length, entries]);
 
+  useEffect(() => {
+    const tokens = tokenizeSearch(searchText);
+    if (
+      !shouldPreloadPinyinSupport(
+        tokens,
+        entries.flatMap((entry) => [entry.title ?? "", ...(entry.keywords ?? [])]),
+      )
+    ) {
+      return;
+    }
+    let cancelled = false;
+    void preloadPinyinSupport().then((loaded) => {
+      if (!cancelled && loaded) {
+        setPinyinVersion((prev) => prev + 1);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [entries, searchText]);
+
   const filterState = useMemo(
     () => buildWorldBookFilterState(entries, searchText, sortMode),
-    [entries, searchText, sortMode],
+    [entries, searchText, sortMode, pinyinVersion],
   );
   const filteredEntries = filterState.entries;
 

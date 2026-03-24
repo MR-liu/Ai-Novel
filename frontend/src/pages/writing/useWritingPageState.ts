@@ -49,6 +49,7 @@ export type WritingPageState = {
   loading: boolean;
   dirty: boolean;
   showUnsavedGuard: boolean;
+  hasVisibleOverlays: boolean;
   workspaceProps: WritingWorkspaceProps;
   chapterListDrawerProps: WritingChapterListDrawerProps;
   overlaysProps: WritingPageOverlaysProps;
@@ -651,6 +652,20 @@ export function useWritingPageState(): WritingPageState {
       onSelectRun: (run) => void history.selectRun(run),
     },
   };
+  const hasVisibleOverlays =
+    overlaysProps.studioToolsDrawerProps.open ||
+    overlaysProps.createChapterDialogProps.open ||
+    overlaysProps.batchGenerationModalProps.open ||
+    overlaysProps.chapterAnalysisModalProps.open ||
+    overlaysProps.aiGenerateDrawerProps.open ||
+    overlaysProps.postEditCompareDrawerProps.open ||
+    overlaysProps.contentOptimizeCompareDrawerProps.open ||
+    overlaysProps.promptInspectorDrawerProps.open ||
+    overlaysProps.contextPreviewDrawerProps.open ||
+    overlaysProps.tablesPanelProps.open ||
+    overlaysProps.memoryUpdateDrawerProps.open ||
+    overlaysProps.foreshadowDrawerProps.open ||
+    overlaysProps.generationHistoryDrawerProps.open;
 
   const streamFloatingProps: WritingStreamFloatingCardProps = {
     open: generating && genForm.stream && !aiOpen,
@@ -666,6 +681,7 @@ export function useWritingPageState(): WritingPageState {
     loading,
     dirty,
     showUnsavedGuard: dirty && outletActive,
+    hasVisibleOverlays,
     workspaceProps,
     chapterListDrawerProps,
     overlaysProps,

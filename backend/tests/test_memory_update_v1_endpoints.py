@@ -224,6 +224,42 @@ class TestMemoryUpdateV1Endpoints(unittest.TestCase):
             self.assertIsNotNone(e1)
             self.assertIsNone(e1.deleted_at)
 
+    def test_propose_is_idempotent_for_same_request_key(self) -> None:
+        client = TestClient(self.app)
+        payload = {
+            "schema_version": "memory_update_v1",
+            "idempotency_key": "key-idempotent-propose-1",
+            "title": "upsert entity",
+            "ops": [
+                {
+                    "op": "upsert",
+                    "target_table": "entities",
+                    "target_id": "e_same",
+                    "after": {"entity_type": "character", "name": "Alice"},
+                }
+            ],
+        }
+
+        first = client.post(
+            "/api/chapters/c1/memory/propose",
+            headers={"X-Test-User": "u_editor"},
+            json=payload,
+        )
+        second = client.post(
+            "/api/chapters/c1/memory/propose",
+            headers={"X-Test-User": "u_editor"},
+            json=payload,
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        first_data = first.json()["data"]
+        second_data = second.json()["data"]
+        self.assertFalse(bool(first_data["idempotent"]))
+        self.assertTrue(bool(second_data["idempotent"]))
+        self.assertEqual(first_data["change_set"]["id"], second_data["change_set"]["id"])
+        self.assertEqual(len(second_data["items"]), 1)
+
     def test_change_set_cannot_cross_project_apply(self) -> None:
         client = TestClient(self.app)
         propose = client.post(

@@ -3,11 +3,13 @@ import { Link, Navigate, useParams } from "react-router-dom";
 import { AuthorPageIntro, AuthorPageTabs } from "../components/layout/AuthorPageScaffold";
 import { buildProjectReviewPath, type ReviewTab } from "../lib/projectRoutes";
 
-import { ChapterAnalysisPage } from "./ChapterAnalysisPage";
-import { ChapterReaderPage } from "./ChapterReaderPage";
-import { ForeshadowsPage } from "./ForeshadowsPage";
-import { PreviewPage } from "./PreviewPage";
+import { lazyPage, PageContentLoader } from "./lazyPage";
 import { getReviewTrackSummary, REVIEW_TAB_COPY, REVIEW_TABS } from "./reviewModels";
+
+const LazyChapterAnalysisPage = lazyPage(() => import("./ChapterAnalysisPage"), (mod) => mod.ChapterAnalysisPage);
+const LazyChapterReaderPage = lazyPage(() => import("./ChapterReaderPage"), (mod) => mod.ChapterReaderPage);
+const LazyForeshadowsPage = lazyPage(() => import("./ForeshadowsPage"), (mod) => mod.ForeshadowsPage);
+const LazyPreviewPage = lazyPage(() => import("./PreviewPage"), (mod) => mod.PreviewPage);
 
 export function ReviewPage() {
   const { projectId, tab } = useParams();
@@ -76,10 +78,12 @@ export function ReviewPage() {
           </div>
         </div>
       </section>
-      {currentTab === "preview" ? <PreviewPage /> : null}
-      {currentTab === "reader" ? <ChapterReaderPage /> : null}
-      {currentTab === "analysis" ? <ChapterAnalysisPage /> : null}
-      {currentTab === "foreshadows" ? <ForeshadowsPage /> : null}
+      <PageContentLoader>
+        {currentTab === "preview" ? <LazyPreviewPage /> : null}
+        {currentTab === "reader" ? <LazyChapterReaderPage /> : null}
+        {currentTab === "analysis" ? <LazyChapterAnalysisPage /> : null}
+        {currentTab === "foreshadows" ? <LazyForeshadowsPage /> : null}
+      </PageContentLoader>
     </div>
   );
 }
