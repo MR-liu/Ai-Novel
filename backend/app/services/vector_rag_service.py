@@ -31,6 +31,10 @@ from app.services.embedding_service import (
     embedding_enabled_reason,
     resolve_embedding_config,
 )
+from app.services.vector_query_flow import (
+    apply_vector_rerank as _apply_vector_rerank,
+    finalize_vector_query_candidates as _finalize_vector_query_candidates,
+)
 from app.services.rerank_service import rerank_candidates as rerank_candidates_with_providers
 
 logger = logging.getLogger("ainovel")
@@ -2047,6 +2051,59 @@ def query_project(
     qvec = (embed_out.get("vectors") or [[]])[0]
 
     top_k = int(settings.vector_max_candidates or 20)
+    final_max_chunks = int(settings.vector_final_max_chunks or 6)
+    per_source_max_chunks = int(getattr(settings, "vector_per_source_id_max_chunks", 1) or 1)
+    final_char_limit = int(settings.vector_final_char_limit or 6000)
+
+    def _apply_query_rerank(candidates: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        return _apply_vector_rerank(
+            query_text=query_text,
+            candidates=candidates,
+            rerank_enabled=rerank_enabled,
+            rerank_method=rerank_method,
+            rerank_top_k=rerank_top_k,
+            rerank_hybrid_alpha=rerank_hybrid_alpha,
+            rerank_external=rerank_external,
+            rerank_candidates_fn=_rerank_candidates,
+        )
+
+    def _finalize_query_result(
+        *,
+        candidates_total: int,
+        candidates: list[dict[str, Any]],
+        rerank_obs: dict[str, Any],
+        query_elapsed_ms: int,
+    ):
+        return _finalize_vector_query_candidates(
+            candidates_total=candidates_total,
+            candidates=candidates,
+            top_k=top_k,
+            final_max_chunks=final_max_chunks,
+            per_source_max_chunks=per_source_max_chunks,
+            final_char_limit=final_char_limit,
+            super_sort=super_sort,
+            rerank_obs=rerank_obs,
+            embed_ms=embed_ms,
+            query_ms=query_elapsed_ms,
+            candidate_key_fn=_vector_candidate_key,
+            candidate_chunk_key_fn=_vector_candidate_chunk_key,
+            super_sort_fn=lambda chunks, config: _super_sort_final_chunks(chunks, super_sort=config),
+            format_text_fn=lambda chunks, char_limit: _format_final_text(chunks, char_limit=char_limit),
+            build_counts_fn=lambda total, returned, selected, dropped: _build_vector_query_counts(
+                candidates_total=total,
+                returned_candidates=returned,
+                final_selected=selected,
+                dropped=dropped,
+            ),
+            build_budget_observability_fn=lambda max_candidates, max_chunks, per_source_limit, char_limit, dropped: _vector_budget_observability(
+                top_k=max_candidates,
+                max_chunks=max_chunks,
+                per_source_max_chunks=per_source_limit,
+                char_limit=char_limit,
+                dropped=dropped,
+            ),
+        )
+
     pgvector_error: str | None = None
     if _prefer_pgvector() and bool(getattr(settings, "vector_hybrid_enabled", True)):
         query_start = time.perf_counter()
@@ -2063,105 +2120,22 @@ def query_project(
                 cc.pop("_rrf_score", None)
                 candidates.append(cc)
 
-            trimmed_candidates = candidates[:top_k]
-            if not rerank_enabled:
-                before_ids = [str(c.get("id") or "") for c in trimmed_candidates if isinstance(c, dict)]
-                rerank_obs: dict[str, Any] = {
-                    "enabled": False,
-                    "applied": False,
-                    "requested_method": rerank_method,
-                    "method": None,
-                    "provider": None,
-                    "model": None,
-                    "top_k": int(rerank_top_k),
-                    "hybrid_alpha": float(rerank_hybrid_alpha),
-                    "hybrid_applied": False,
-                    "after_rerank": list(before_ids),
-                    "reason": "disabled",
-                    "error_type": None,
-                    "before": before_ids,
-                    "after": list(before_ids),
-                    "timing_ms": 0,
-                    "errors": [],
-                }
-            elif trimmed_candidates:
-                trimmed_candidates, rerank_obs = _rerank_candidates(
-                    query_text=query_text,
-                    candidates=trimmed_candidates,
-                    method=rerank_method,
-                    top_k=rerank_top_k,
-                    hybrid_alpha=rerank_hybrid_alpha,
-                    external=rerank_external,
-                )
-            else:
-                rerank_obs = {
-                    "enabled": True,
-                    "applied": False,
-                    "requested_method": rerank_method,
-                    "method": None,
-                    "provider": None,
-                    "model": None,
-                    "top_k": int(rerank_top_k),
-                    "hybrid_alpha": float(rerank_hybrid_alpha),
-                    "hybrid_applied": False,
-                    "after_rerank": [],
-                    "reason": "empty_candidates",
-                    "error_type": None,
-                    "before": [],
-                    "after": [],
-                    "timing_ms": 0,
-                    "errors": [],
-                }
-            dropped: list[dict[str, Any]] = []
-            final_chunks: list[dict[str, Any]] = []
-            seen_chunk_keys: set[tuple[str, str, int]] = set()
-            selected_by_source: dict[tuple[str, str], int] = {}
-            max_chunks = int(settings.vector_final_max_chunks or 6)
-            max_chunks = max(1, min(int(max_chunks), 1000))
-            per_source_max_chunks = int(getattr(settings, "vector_per_source_id_max_chunks", 1) or 1)
-            per_source_max_chunks = max(1, min(int(per_source_max_chunks), 1000))
-            processed = 0
-            for c in trimmed_candidates:
-                processed += 1
-                source_key = _vector_candidate_key(c)
-                chunk_key = _vector_candidate_chunk_key(c)
-                if chunk_key in seen_chunk_keys:
-                    dropped.append({"id": c.get("id"), "reason": "duplicate_chunk"})
-                    continue
-                seen_chunk_keys.add(chunk_key)
-                if selected_by_source.get(source_key, 0) >= per_source_max_chunks:
-                    dropped.append({"id": c.get("id"), "reason": "per_source_budget"})
-                    continue
-                final_chunks.append(c)
-                selected_by_source[source_key] = selected_by_source.get(source_key, 0) + 1
-                if len(final_chunks) >= max_chunks:
-                    break
-
-            if len(final_chunks) >= max_chunks:
-                for c in trimmed_candidates[processed:]:
-                    dropped.append({"id": c.get("id"), "reason": "budget"})
-
-            final_chunks, super_sort_obs = _super_sort_final_chunks(final_chunks, super_sort=super_sort)
-
-            final_char_limit = int(settings.vector_final_char_limit or 6000)
-            post_start = time.perf_counter()
-            text_md, truncated = _format_final_text(final_chunks, char_limit=final_char_limit)
-            post_ms = int((time.perf_counter() - post_start) * 1000)
-
-            timings_ms = {"embed": embed_ms, "query": query_ms, "post": post_ms, "rerank": int(rerank_obs.get("timing_ms") or 0)}
-            obs_counts = _build_vector_query_counts(
+            trimmed_candidates, rerank_obs = _apply_query_rerank(candidates[:top_k])
+            finalized = _finalize_query_result(
                 candidates_total=len(candidates),
-                returned_candidates=trimmed_candidates,
-                final_selected=len(final_chunks),
-                dropped=dropped,
+                candidates=trimmed_candidates,
+                rerank_obs=rerank_obs,
+                query_elapsed_ms=query_ms,
             )
-            budget_obs = _vector_budget_observability(
-                top_k=top_k,
-                max_chunks=max_chunks,
-                per_source_max_chunks=per_source_max_chunks,
-                char_limit=final_char_limit,
-                dropped=dropped,
-            )
+            trimmed_candidates = finalized.trimmed_candidates
+            dropped = finalized.dropped
+            final_chunks = finalized.final_chunks
+            super_sort_obs = finalized.super_sort_obs
+            text_md = finalized.text_md
+            truncated = finalized.truncated
+            timings_ms = finalized.timings_ms
+            obs_counts = finalized.counts
+            budget_obs = finalized.budget_observability
             log_event(
                 logger,
                 "info",
@@ -2327,106 +2301,22 @@ def query_project(
         rrf_k=rrf_k,
     )
 
-    trimmed_candidates = candidates[:top_k]
-    if not rerank_enabled:
-        before_ids = [str(c.get("id") or "") for c in trimmed_candidates if isinstance(c, dict)]
-        rerank_obs = {
-            "enabled": False,
-            "applied": False,
-            "requested_method": rerank_method,
-            "method": None,
-            "provider": None,
-            "model": None,
-            "top_k": int(rerank_top_k),
-            "hybrid_alpha": float(rerank_hybrid_alpha),
-            "hybrid_applied": False,
-            "after_rerank": list(before_ids),
-            "reason": "disabled",
-            "error_type": None,
-            "before": before_ids,
-            "after": list(before_ids),
-            "timing_ms": 0,
-            "errors": [],
-        }
-    elif trimmed_candidates:
-        trimmed_candidates, rerank_obs = _rerank_candidates(
-            query_text=query_text,
-            candidates=trimmed_candidates,
-            method=rerank_method,
-            top_k=rerank_top_k,
-            hybrid_alpha=rerank_hybrid_alpha,
-            external=rerank_external,
-        )
-    else:
-        rerank_obs = {
-            "enabled": True,
-            "applied": False,
-            "requested_method": rerank_method,
-            "method": None,
-            "provider": None,
-            "model": None,
-            "top_k": int(rerank_top_k),
-            "hybrid_alpha": float(rerank_hybrid_alpha),
-            "hybrid_applied": False,
-            "after_rerank": [],
-            "reason": "empty_candidates",
-            "error_type": None,
-            "before": [],
-            "after": [],
-            "timing_ms": 0,
-            "errors": [],
-        }
-
-    dropped: list[dict[str, Any]] = []
-    final_chunks: list[dict[str, Any]] = []
-    seen_chunk_keys: set[tuple[str, str, int]] = set()
-    selected_by_source: dict[tuple[str, str], int] = {}
-    max_chunks = int(settings.vector_final_max_chunks or 6)
-    max_chunks = max(1, min(int(max_chunks), 1000))
-    per_source_max_chunks = int(getattr(settings, "vector_per_source_id_max_chunks", 1) or 1)
-    per_source_max_chunks = max(1, min(int(per_source_max_chunks), 1000))
-    processed = 0
-    for c in trimmed_candidates:
-        processed += 1
-        source_key = _vector_candidate_key(c)
-        chunk_key = _vector_candidate_chunk_key(c)
-        if chunk_key in seen_chunk_keys:
-            dropped.append({"id": c.get("id"), "reason": "duplicate_chunk"})
-            continue
-        seen_chunk_keys.add(chunk_key)
-        if selected_by_source.get(source_key, 0) >= per_source_max_chunks:
-            dropped.append({"id": c.get("id"), "reason": "per_source_budget"})
-            continue
-        final_chunks.append(c)
-        selected_by_source[source_key] = selected_by_source.get(source_key, 0) + 1
-        if len(final_chunks) >= max_chunks:
-            break
-
-    if len(final_chunks) >= max_chunks:
-        for c in trimmed_candidates[processed:]:
-            dropped.append({"id": c.get("id"), "reason": "budget"})
-
-    final_chunks, super_sort_obs = _super_sort_final_chunks(final_chunks, super_sort=super_sort)
-
-    final_char_limit = int(settings.vector_final_char_limit or 6000)
-    post_start = time.perf_counter()
-    text_md, truncated = _format_final_text(final_chunks, char_limit=final_char_limit)
-    post_ms = int((time.perf_counter() - post_start) * 1000)
-
-    timings_ms = {"embed": embed_ms, "query": query_ms, "post": post_ms, "rerank": int(rerank_obs.get("timing_ms") or 0)}
-    obs_counts = _build_vector_query_counts(
+    trimmed_candidates, rerank_obs = _apply_query_rerank(candidates[:top_k])
+    finalized = _finalize_query_result(
         candidates_total=len(candidates),
-        returned_candidates=trimmed_candidates,
-        final_selected=len(final_chunks),
-        dropped=dropped,
+        candidates=trimmed_candidates,
+        rerank_obs=rerank_obs,
+        query_elapsed_ms=query_ms,
     )
-    budget_obs = _vector_budget_observability(
-        top_k=top_k,
-        max_chunks=max_chunks,
-        per_source_max_chunks=per_source_max_chunks,
-        char_limit=final_char_limit,
-        dropped=dropped,
-    )
+    trimmed_candidates = finalized.trimmed_candidates
+    dropped = finalized.dropped
+    final_chunks = finalized.final_chunks
+    super_sort_obs = finalized.super_sort_obs
+    text_md = finalized.text_md
+    truncated = finalized.truncated
+    timings_ms = finalized.timings_ms
+    obs_counts = finalized.counts
+    budget_obs = finalized.budget_observability
     log_event(
         logger,
         "info",

@@ -27,17 +27,12 @@ import type {
 import {
   buildPresetPayload,
   DEFAULT_LLM_FORM,
-  DEFAULT_VECTOR_RAG_FORM,
   formFromProfile,
   formFromPreset,
-  mapVectorFormFromSettings,
   payloadEquals,
   payloadFromPreset,
   parseTimeoutSecondsForTest,
   type LlmCapabilities,
-  type VectorEmbeddingDryRunResult,
-  type VectorRagForm,
-  type VectorRerankDryRunResult,
 } from "./models";
 import { formatLlmModelListError, formatLlmTestApiError } from "./llmApiError";
 import type { PromptsVectorRagSectionProps } from "./PromptsVectorRagSection";
@@ -54,27 +49,14 @@ import {
   formatPromptsPresetValidationMessage,
   PROMPTS_COPY,
 } from "./promptsCopy";
-
-type TaskModuleView = {
-  task_key: string;
-  label: string;
-  group: string;
-  description: string;
-  llm_profile_id: string | null;
-  form: LlmForm;
-  dirty: boolean;
-  saving: boolean;
-  deleting: boolean;
-  modelList: LlmModelListState;
-};
-
-const EMPTY_MODEL_LIST_STATE: LlmModelListState = {
-  loading: false,
-  options: [],
-  warning: null,
-  error: null,
-  requestId: null,
-};
+import {
+  buildTaskCatalogByKey,
+  buildTaskModuleViews,
+  EMPTY_MODEL_LIST_STATE,
+  pickNextAddTaskKey,
+  type TaskModuleView,
+} from "./promptsPageStateModels";
+import { usePromptsVectorRagState } from "./usePromptsVectorRagState";
 
 type PromptsPageBlockingLoadError = {
   message: string;
@@ -123,38 +105,40 @@ export function usePromptsPageState(): PromptsPageState {
   const capsGuardRef = useRef(createRequestSeqGuard());
 
   const [apiKey, setApiKey] = useState("");
-  const [baselineSettings, setBaselineSettings] = useState<ProjectSettings | null>(null);
-  const [vectorForm, setVectorForm] = useState<VectorRagForm>(DEFAULT_VECTOR_RAG_FORM);
-  const [vectorRerankTopKDraft, setVectorRerankTopKDraft] = useState(
-    String(DEFAULT_VECTOR_RAG_FORM.vector_rerank_top_k),
-  );
-  const [vectorRerankTimeoutDraft, setVectorRerankTimeoutDraft] = useState("");
-  const [vectorRerankHybridAlphaDraft, setVectorRerankHybridAlphaDraft] = useState("");
-  const [vectorApiKeyDraft, setVectorApiKeyDraft] = useState("");
-  const [vectorApiKeyClearRequested, setVectorApiKeyClearRequested] = useState(false);
-  const [rerankApiKeyDraft, setRerankApiKeyDraft] = useState("");
-  const [rerankApiKeyClearRequested, setRerankApiKeyClearRequested] = useState(false);
-  const [savingVector, setSavingVector] = useState(false);
-  const savingVectorRef = useRef(false);
-  const [embeddingDryRunLoading, setEmbeddingDryRunLoading] = useState(false);
-  const [embeddingDryRun, setEmbeddingDryRun] = useState<null | {
-    requestId: string;
-    result: VectorEmbeddingDryRunResult;
-  }>(null);
-  const [embeddingDryRunError, setEmbeddingDryRunError] = useState<null | {
-    message: string;
-    code: string;
-    requestId?: string;
-  }>(null);
-  const [rerankDryRunLoading, setRerankDryRunLoading] = useState(false);
-  const [rerankDryRun, setRerankDryRun] = useState<null | { requestId: string; result: VectorRerankDryRunResult }>(
-    null,
-  );
-  const [rerankDryRunError, setRerankDryRunError] = useState<null | {
-    message: string;
-    code: string;
-    requestId?: string;
-  }>(null);
+  const {
+    baselineSettings,
+    vectorForm,
+    setVectorForm,
+    vectorRerankTopKDraft,
+    setVectorRerankTopKDraft,
+    vectorRerankTimeoutDraft,
+    setVectorRerankTimeoutDraft,
+    vectorRerankHybridAlphaDraft,
+    setVectorRerankHybridAlphaDraft,
+    vectorApiKeyDraft,
+    setVectorApiKeyDraft,
+    vectorApiKeyClearRequested,
+    setVectorApiKeyClearRequested,
+    rerankApiKeyDraft,
+    setRerankApiKeyDraft,
+    rerankApiKeyClearRequested,
+    setRerankApiKeyClearRequested,
+    savingVector,
+    vectorRagDirty,
+    vectorApiKeyDirty,
+    rerankApiKeyDirty,
+    embeddingProviderPreview,
+    embeddingDryRunLoading,
+    embeddingDryRun,
+    embeddingDryRunError,
+    rerankDryRunLoading,
+    rerankDryRun,
+    rerankDryRunError,
+    applyLoadedSettings,
+    saveVectorRagConfig,
+    runEmbeddingDryRun,
+    runRerankDryRun,
+  } = usePromptsVectorRagState({ projectId, toast });
 
   const [llmForm, setLlmForm] = useState<LlmForm>({ ...DEFAULT_LLM_FORM });
   const [mainModelList, setMainModelList] = useState<LlmModelListState>({ ...EMPTY_MODEL_LIST_STATE });
@@ -225,16 +209,7 @@ export function usePromptsPageState(): PromptsPageState {
       setSelectedAddTaskKey(firstAddable);
 
       const settings = settingsRes.data.settings;
-      const mappedVector = mapVectorFormFromSettings(settings);
-      setBaselineSettings(settings);
-      setVectorForm(mappedVector.vectorForm);
-      setVectorRerankTopKDraft(mappedVector.vectorRerankTopKDraft);
-      setVectorRerankTimeoutDraft(mappedVector.vectorRerankTimeoutDraft);
-      setVectorRerankHybridAlphaDraft(mappedVector.vectorRerankHybridAlphaDraft);
-      setVectorApiKeyDraft("");
-      setVectorApiKeyClearRequested(false);
-      setRerankApiKeyDraft("");
-      setRerankApiKeyClearRequested(false);
+      applyLoadedSettings(settings);
 
       setApiKey("");
       setMainModelList({ ...EMPTY_MODEL_LIST_STATE });
@@ -314,37 +289,20 @@ export function usePromptsPageState(): PromptsPageState {
     setProfiles((prev) => [profile, ...prev.filter((item) => item.id !== profile.id)]);
   }, []);
 
-  const taskCatalogByKey = useMemo(() => {
-    const map = new Map<string, LLMTaskCatalogItem>();
-    for (const item of taskCatalog) map.set(item.key, item);
-    return map;
-  }, [taskCatalog]);
+  const taskCatalogByKey = useMemo(() => buildTaskCatalogByKey(taskCatalog), [taskCatalog]);
 
-  const taskModules = useMemo<TaskModuleView[]>(() => {
-    return Object.values(taskDrafts)
-      .map((draft) => {
-        const baseline = taskBaseline[draft.task_key] ?? null;
-        const baselinePayload = baseline ? payloadFromPreset(baseline) : null;
-        const payload = buildPresetPayload(draft.form);
-        const payloadDirty =
-          baselinePayload === null || !payload.ok ? true : !payloadEquals(payload.payload, baselinePayload);
-        const bindingDirty = (draft.llm_profile_id ?? null) !== (baseline?.llm_profile_id ?? null);
-        const item = taskCatalogByKey.get(draft.task_key);
-        return {
-          task_key: draft.task_key,
-          label: item?.label ?? draft.task_key,
-          group: item?.group ?? "custom",
-          description: item?.description ?? "任务例外设置",
-          llm_profile_id: draft.llm_profile_id,
-          form: draft.form,
-          dirty: draft.isNew || payloadDirty || bindingDirty,
-          saving: Boolean(taskSaving[draft.task_key]),
-          deleting: Boolean(taskDeleting[draft.task_key]),
-          modelList: taskModelLists[draft.task_key] ?? { ...EMPTY_MODEL_LIST_STATE },
-        };
-      })
-      .sort((a, b) => a.group.localeCompare(b.group, "zh-Hans-CN") || a.label.localeCompare(b.label, "zh-Hans-CN"));
-  }, [taskBaseline, taskCatalogByKey, taskDeleting, taskDrafts, taskModelLists, taskSaving]);
+  const taskModules = useMemo<TaskModuleView[]>(
+    () =>
+      buildTaskModuleViews({
+        taskDrafts,
+        taskBaseline,
+        taskCatalogByKey,
+        taskSaving,
+        taskDeleting,
+        taskModelLists,
+      }),
+    [taskBaseline, taskCatalogByKey, taskDeleting, taskDrafts, taskModelLists, taskSaving],
+  );
 
   const taskDirty = useMemo(() => taskModules.some((item) => item.dirty), [taskModules]);
   const addableTasks = useMemo(() => taskCatalog.filter((item) => !taskDrafts[item.key]), [taskCatalog, taskDrafts]);
@@ -362,12 +320,9 @@ export function usePromptsPageState(): PromptsPageState {
   const llmCtaBlockedReason = mainAccessState.actionReason;
 
   useEffect(() => {
-    if (!addableTasks.length) {
-      if (selectedAddTaskKey) setSelectedAddTaskKey("");
-      return;
-    }
-    if (selectedAddTaskKey && addableTasks.some((item) => item.key === selectedAddTaskKey)) return;
-    setSelectedAddTaskKey(addableTasks[0].key);
+    const nextKey = pickNextAddTaskKey(addableTasks, selectedAddTaskKey);
+    if (nextKey === selectedAddTaskKey) return;
+    setSelectedAddTaskKey(nextKey);
   }, [addableTasks, selectedAddTaskKey]);
 
   const saveAll = useCallback(
@@ -840,230 +795,6 @@ export function usePromptsPageState(): PromptsPageState {
       projectId ?? "",
     ],
   });
-
-  const vectorApiKeyDirty = vectorApiKeyClearRequested || vectorApiKeyDraft.trim().length > 0;
-  const rerankApiKeyDirty = rerankApiKeyClearRequested || rerankApiKeyDraft.trim().length > 0;
-  const vectorRagDirty = useMemo(() => {
-    if (!baselineSettings) return false;
-    return (
-      vectorForm.vector_rerank_enabled !== baselineSettings.vector_rerank_effective_enabled ||
-      vectorForm.vector_rerank_method.trim() !== baselineSettings.vector_rerank_effective_method ||
-      Math.max(1, Math.min(1000, Math.floor(vectorForm.vector_rerank_top_k))) !==
-        baselineSettings.vector_rerank_effective_top_k ||
-      vectorForm.vector_rerank_provider !== baselineSettings.vector_rerank_provider ||
-      vectorForm.vector_rerank_base_url !== baselineSettings.vector_rerank_base_url ||
-      vectorForm.vector_rerank_model !== baselineSettings.vector_rerank_model ||
-      (vectorForm.vector_rerank_timeout_seconds ?? null) !== (baselineSettings.vector_rerank_timeout_seconds ?? null) ||
-      (vectorForm.vector_rerank_hybrid_alpha ?? null) !== (baselineSettings.vector_rerank_hybrid_alpha ?? null) ||
-      vectorForm.vector_embedding_provider !== baselineSettings.vector_embedding_provider ||
-      vectorForm.vector_embedding_base_url !== baselineSettings.vector_embedding_base_url ||
-      vectorForm.vector_embedding_model !== baselineSettings.vector_embedding_model ||
-      vectorForm.vector_embedding_azure_deployment !== baselineSettings.vector_embedding_azure_deployment ||
-      vectorForm.vector_embedding_azure_api_version !== baselineSettings.vector_embedding_azure_api_version ||
-      vectorForm.vector_embedding_sentence_transformers_model !==
-        baselineSettings.vector_embedding_sentence_transformers_model
-    );
-  }, [baselineSettings, vectorForm]);
-
-  const saveVectorRagConfig = useCallback(async (): Promise<boolean> => {
-    if (!projectId) return false;
-    if (!baselineSettings) return false;
-    if (!vectorRagDirty && !vectorApiKeyDirty && !rerankApiKeyDirty) return true;
-    if (savingVectorRef.current) return false;
-
-    const rerankMethod = vectorForm.vector_rerank_method.trim() || "auto";
-    const rawTopK = vectorRerankTopKDraft.trim();
-    const parsedTopK = Math.floor(Number(rawTopK || String(vectorForm.vector_rerank_top_k)));
-    if (!Number.isFinite(parsedTopK) || parsedTopK < 1 || parsedTopK > 1000) {
-      toast.toastError(PROMPTS_COPY.vectorRag.topKInvalid);
-      return false;
-    }
-
-    const timeoutRaw = vectorRerankTimeoutDraft.trim();
-    const parsedTimeoutSeconds = timeoutRaw ? Math.floor(Number(timeoutRaw)) : null;
-    if (
-      parsedTimeoutSeconds !== null &&
-      (!Number.isFinite(parsedTimeoutSeconds) || parsedTimeoutSeconds < 1 || parsedTimeoutSeconds > 120)
-    ) {
-      toast.toastError(PROMPTS_COPY.vectorRag.timeoutInvalid);
-      return false;
-    }
-
-    const alphaRaw = vectorRerankHybridAlphaDraft.trim();
-    const parsedHybridAlpha = alphaRaw ? Number(alphaRaw) : null;
-    if (
-      parsedHybridAlpha !== null &&
-      (!Number.isFinite(parsedHybridAlpha) || parsedHybridAlpha < 0 || parsedHybridAlpha > 1)
-    ) {
-      toast.toastError(PROMPTS_COPY.vectorRag.hybridAlphaInvalid);
-      return false;
-    }
-
-    savingVectorRef.current = true;
-    setSavingVector(true);
-    try {
-      const res = await apiJson<{ settings: ProjectSettings }>(`/api/projects/${projectId}/settings`, {
-        method: "PUT",
-        body: JSON.stringify({
-          vector_rerank_enabled: Boolean(vectorForm.vector_rerank_enabled),
-          vector_rerank_method: rerankMethod,
-          vector_rerank_top_k: parsedTopK,
-          vector_rerank_provider: vectorForm.vector_rerank_provider,
-          vector_rerank_base_url: vectorForm.vector_rerank_base_url,
-          vector_rerank_model: vectorForm.vector_rerank_model,
-          vector_rerank_timeout_seconds: parsedTimeoutSeconds,
-          vector_rerank_hybrid_alpha: parsedHybridAlpha,
-          vector_embedding_provider: vectorForm.vector_embedding_provider,
-          vector_embedding_base_url: vectorForm.vector_embedding_base_url,
-          vector_embedding_model: vectorForm.vector_embedding_model,
-          vector_embedding_azure_deployment: vectorForm.vector_embedding_azure_deployment,
-          vector_embedding_azure_api_version: vectorForm.vector_embedding_azure_api_version,
-          vector_embedding_sentence_transformers_model: vectorForm.vector_embedding_sentence_transformers_model,
-          ...(rerankApiKeyDirty ? { vector_rerank_api_key: rerankApiKeyClearRequested ? "" : rerankApiKeyDraft } : {}),
-          ...(vectorApiKeyDirty
-            ? { vector_embedding_api_key: vectorApiKeyClearRequested ? "" : vectorApiKeyDraft }
-            : {}),
-        }),
-      });
-
-      const settings = res.data.settings;
-      const nextTopK = Number(settings.vector_rerank_effective_top_k ?? 20) || 20;
-      setBaselineSettings(settings);
-      setVectorForm({
-        vector_rerank_enabled: Boolean(settings.vector_rerank_effective_enabled),
-        vector_rerank_method: String(settings.vector_rerank_effective_method ?? "auto") || "auto",
-        vector_rerank_top_k: nextTopK,
-        vector_rerank_provider: settings.vector_rerank_provider ?? "",
-        vector_rerank_base_url: settings.vector_rerank_base_url ?? "",
-        vector_rerank_model: settings.vector_rerank_model ?? "",
-        vector_rerank_timeout_seconds: settings.vector_rerank_timeout_seconds ?? null,
-        vector_rerank_hybrid_alpha: settings.vector_rerank_hybrid_alpha ?? null,
-        vector_embedding_provider: settings.vector_embedding_provider ?? "",
-        vector_embedding_base_url: settings.vector_embedding_base_url ?? "",
-        vector_embedding_model: settings.vector_embedding_model ?? "",
-        vector_embedding_azure_deployment: settings.vector_embedding_azure_deployment ?? "",
-        vector_embedding_azure_api_version: settings.vector_embedding_azure_api_version ?? "",
-        vector_embedding_sentence_transformers_model: settings.vector_embedding_sentence_transformers_model ?? "",
-      });
-      setVectorRerankTopKDraft(String(nextTopK));
-      setVectorRerankTimeoutDraft(
-        settings.vector_rerank_timeout_seconds != null ? String(settings.vector_rerank_timeout_seconds) : "",
-      );
-      setVectorRerankHybridAlphaDraft(
-        settings.vector_rerank_hybrid_alpha != null ? String(settings.vector_rerank_hybrid_alpha) : "",
-      );
-      setVectorApiKeyDraft("");
-      setVectorApiKeyClearRequested(false);
-      setRerankApiKeyDraft("");
-      setRerankApiKeyClearRequested(false);
-
-      toast.toastSuccess(PROMPTS_COPY.vectorRag.saveSuccess);
-      return true;
-    } catch (e) {
-      const err = e as ApiError;
-      toast.toastError(buildPromptsActionError("保存资料策略", err.message, err.code), err.requestId);
-      return false;
-    } finally {
-      setSavingVector(false);
-      savingVectorRef.current = false;
-    }
-  }, [
-    baselineSettings,
-    projectId,
-    rerankApiKeyClearRequested,
-    rerankApiKeyDirty,
-    rerankApiKeyDraft,
-    toast,
-    vectorApiKeyClearRequested,
-    vectorApiKeyDirty,
-    vectorApiKeyDraft,
-    vectorForm,
-    vectorRagDirty,
-    vectorRerankHybridAlphaDraft,
-    vectorRerankTopKDraft,
-    vectorRerankTimeoutDraft,
-  ]);
-
-  const runEmbeddingDryRun = useCallback(async () => {
-    if (!projectId) return;
-    if (savingVector || embeddingDryRunLoading || rerankDryRunLoading) return;
-
-    if (vectorRagDirty || vectorApiKeyDirty || rerankApiKeyDirty) {
-      toast.toastError(PROMPTS_COPY.vectorRag.saveBeforeTestToast);
-      return;
-    }
-
-    setEmbeddingDryRunLoading(true);
-    setEmbeddingDryRunError(null);
-    try {
-      const res = await apiJson<{ result: VectorEmbeddingDryRunResult }>(
-        `/api/projects/${projectId}/vector/embeddings/dry-run`,
-        {
-          method: "POST",
-          body: JSON.stringify({ text: "hello world" }),
-        },
-      );
-      setEmbeddingDryRun({ requestId: res.request_id, result: res.data.result });
-      toast.toastSuccess(PROMPTS_COPY.vectorRag.embeddingDryRunSuccess, res.request_id);
-    } catch (e) {
-      const err = e as ApiError;
-      setEmbeddingDryRunError({ message: err.message, code: err.code, requestId: err.requestId });
-      toast.toastError(buildPromptsActionError("检查资料召回连接", err.message, err.code), err.requestId);
-    } finally {
-      setEmbeddingDryRunLoading(false);
-    }
-  }, [
-    embeddingDryRunLoading,
-    projectId,
-    rerankApiKeyDirty,
-    rerankDryRunLoading,
-    savingVector,
-    toast,
-    vectorApiKeyDirty,
-    vectorRagDirty,
-  ]);
-
-  const runRerankDryRun = useCallback(async () => {
-    if (!projectId) return;
-    if (savingVector || embeddingDryRunLoading || rerankDryRunLoading) return;
-
-    if (vectorRagDirty || vectorApiKeyDirty || rerankApiKeyDirty) {
-      toast.toastError(PROMPTS_COPY.vectorRag.saveBeforeTestToast);
-      return;
-    }
-
-    setRerankDryRunLoading(true);
-    setRerankDryRunError(null);
-    try {
-      const res = await apiJson<{ result: VectorRerankDryRunResult }>(
-        `/api/projects/${projectId}/vector/rerank/dry-run`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            query_text: "dragon castle",
-            documents: ["apple banana", "dragon castle"],
-          }),
-        },
-      );
-      setRerankDryRun({ requestId: res.request_id, result: res.data.result });
-      toast.toastSuccess(PROMPTS_COPY.vectorRag.rerankDryRunSuccess, res.request_id);
-    } catch (e) {
-      const err = e as ApiError;
-      setRerankDryRunError({ message: err.message, code: err.code, requestId: err.requestId });
-      toast.toastError(buildPromptsActionError("检查结果排序链路", err.message, err.code), err.requestId);
-    } finally {
-      setRerankDryRunLoading(false);
-    }
-  }, [
-    embeddingDryRunLoading,
-    projectId,
-    rerankApiKeyDirty,
-    rerankDryRunLoading,
-    savingVector,
-    toast,
-    vectorApiKeyDirty,
-    vectorRagDirty,
-  ]);
 
   const selectProfile = useCallback(
     async (profileId: string | null) => {
@@ -1558,12 +1289,6 @@ export function usePromptsPageState(): PromptsPageState {
     else navigate(`/projects/${projectId}/outline`);
     return true;
   }, [navigate, nextAfterLlm?.href, projectId, saveAllDirtyModules, testConnection]);
-
-  const embeddingProviderPreview = (
-    vectorForm.vector_embedding_provider.trim() ||
-    baselineSettings?.vector_embedding_effective_provider ||
-    "openai_compatible"
-  ).trim();
 
   return {
     loading,
