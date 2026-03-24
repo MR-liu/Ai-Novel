@@ -35,8 +35,14 @@ from app.services.outline_generation_flow import (
     recommend_outline_max_tokens as _recommend_outline_max_tokens,
     should_use_outline_segmented_mode as _should_use_outline_segmented_mode,
 )
+from app.services.outline_postprocess_flow import (
+    OUTLINE_GENERATE_PARSE_REPAIR_PROVIDERS,
+    apply_outline_generation_result_fields as _apply_outline_generation_result_fields,
+    compact_outline_stream_result_data as _compact_outline_stream_result_data,
+    try_fix_outline_generate_parse_error as _try_fix_outline_generate_parse_error,
+)
 from app.services.outline_store import ensure_active_outline
-from app.services.output_contracts import build_repair_prompt_for_task, contract_for_task
+from app.services.output_contracts import contract_for_task
 from app.services.output_parsers import extract_json_value, likely_truncated_json
 from app.services.prompt_presets import render_preset_for_task
 from app.services.run_store import write_generation_run
@@ -2291,41 +2297,20 @@ def generate_outline(
     parsed = contract.parse(raw_output, finish_reason=finish_reason)
     data, warnings, parse_error = parsed.data, parsed.warnings, parsed.parse_error
 
-    if parse_error is not None and prepared.llm_call.provider in (
-        "openai",
-        "openai_responses",
-        "openai_compatible",
-        "openai_responses_compatible",
-    ):
-        try:
-            repair = build_repair_prompt_for_task("outline_generate", raw_output=raw_output)
-            if repair is None:
-                raise AppError(code="OUTLINE_FIX_UNSUPPORTED", message="该任务不支持输出修复", status_code=400)
-            fix_system, fix_user, fix_run_type = repair
-            fix_call = with_param_overrides(prepared.llm_call, {"temperature": 0, "max_tokens": 1024})
-            fixed = call_llm_and_record(
-                logger=logger,
-                request_id=request_id,
-                actor_user_id=user_id,
-                project_id=project_id,
-                chapter_id=None,
-                run_type=fix_run_type,
-                api_key=str(prepared.resolved_api_key),
-                prompt_system=fix_system,
-                prompt_user=fix_user,
-                llm_call=fix_call,
-                run_params_extra_json=prepared.run_params_extra_json,
-            )
-            fixed_parsed = contract.parse(fixed.text)
-            fixed_data, fixed_warnings, fixed_error = fixed_parsed.data, fixed_parsed.warnings, fixed_parsed.parse_error
-            if fixed_error is None and fixed_data.get("chapters"):
-                fixed_data["raw_output"] = raw_output
-                fixed_data["fixed_json"] = fixed_data.get("raw_json") or fixed.text
-                data = fixed_data
-                warnings.extend(["json_fixed_via_llm", *fixed_warnings])
-                parse_error = None
-        except AppError:
-            warnings.append("outline_fix_json_failed")
+    data, warnings, parse_error = _try_fix_outline_generate_parse_error(
+        logger=logger,
+        request_id=request_id,
+        actor_user_id=user_id,
+        project_id=project_id,
+        api_key=str(prepared.resolved_api_key),
+        llm_call=prepared.llm_call,
+        run_params_extra_json=prepared.run_params_extra_json,
+        contract=contract,
+        raw_output=raw_output,
+        data=data,
+        warnings=warnings,
+        parse_error=parse_error,
+    )
 
     if parse_error is None:
         data, coverage_warnings = _enforce_outline_chapter_coverage(
@@ -2351,16 +2336,15 @@ def generate_outline(
                 data["chapter_coverage"] = coverage
 
     warnings = _dedupe_warnings(warnings)
-    if warnings:
-        data["warnings"] = warnings
-    if parse_error is not None:
-        data["parse_error"] = parse_error
-    data["generation_run_id"] = llm_result.run_id
-    data["latency_ms"] = llm_result.latency_ms
-    if llm_result.dropped_params:
-        data["dropped_params"] = llm_result.dropped_params
-    if finish_reason is not None:
-        data["finish_reason"] = finish_reason
+    data = _apply_outline_generation_result_fields(
+        data=data,
+        warnings=warnings,
+        parse_error=parse_error,
+        finish_reason=finish_reason,
+        latency_ms=llm_result.latency_ms,
+        dropped_params=llm_result.dropped_params,
+        generation_run_id=llm_result.run_id,
+    )
     return ok_payload(request_id=request_id, data=data)
 
 
@@ -2552,10 +2536,7 @@ def generate_outline_stream(
             )
             data = _build_outline_segmented_result_data(segmented=segmented, aggregate_run_id=aggregate_run_id)
 
-            result_data = dict(data)
-            result_data.pop("raw_output", None)
-            result_data.pop("raw_json", None)
-            result_data.pop("fixed_json", None)
+            result_data = _compact_outline_stream_result_data(data)
 
             yield sse_progress(message="完成", progress=100, status="success")
             yield sse_result(result_data)
@@ -2646,45 +2627,22 @@ def generate_outline_stream(
             parsed = contract.parse(raw_output, finish_reason=finish_reason)
             data, warnings, parse_error = parsed.data, parsed.warnings, parsed.parse_error
 
-            if parse_error is not None and llm_call.provider in (
-                "openai",
-                "openai_responses",
-                "openai_compatible",
-                "openai_responses_compatible",
-            ):
+            if parse_error is not None and llm_call.provider in OUTLINE_GENERATE_PARSE_REPAIR_PROVIDERS:
                 yield sse_progress(message="尝试修复 JSON...", progress=92)
-                repair = build_repair_prompt_for_task("outline_generate", raw_output=raw_output)
-                if repair is None:
-                    warnings.append("outline_fix_json_failed")
-                    repair = None
-                if repair is None:
-                    raise AppError(code="OUTLINE_FIX_UNSUPPORTED", message="该任务不支持输出修复", status_code=400)
-                fix_system, fix_user, fix_run_type = repair
-                fix_call = with_param_overrides(llm_call, {"temperature": 0, "max_tokens": 1024})
-                try:
-                    fixed = call_llm_and_record(
-                        logger=logger,
-                        request_id=request_id,
-                        actor_user_id=user_id,
-                        project_id=project_id,
-                        chapter_id=None,
-                        run_type=fix_run_type,
-                        api_key=str(resolved_api_key),
-                        prompt_system=fix_system,
-                        prompt_user=fix_user,
-                        llm_call=fix_call,
-                        run_params_extra_json=run_params_extra_json,
-                    )
-                    fixed_parsed = contract.parse(fixed.text)
-                    fixed_data, fixed_warnings, fixed_error = fixed_parsed.data, fixed_parsed.warnings, fixed_parsed.parse_error
-                    if fixed_error is None and fixed_data.get("chapters"):
-                        fixed_data["raw_output"] = raw_output
-                        fixed_data["fixed_json"] = fixed_data.get("raw_json") or fixed.text
-                        data = fixed_data
-                        warnings.extend(["json_fixed_via_llm", *fixed_warnings])
-                        parse_error = None
-                except AppError:
-                    warnings.append("outline_fix_json_failed")
+            data, warnings, parse_error = _try_fix_outline_generate_parse_error(
+                logger=logger,
+                request_id=request_id,
+                actor_user_id=user_id,
+                project_id=project_id,
+                api_key=str(resolved_api_key),
+                llm_call=llm_call,
+                run_params_extra_json=run_params_extra_json,
+                contract=contract,
+                raw_output=raw_output,
+                data=data,
+                warnings=warnings,
+                parse_error=parse_error,
+            )
 
             if parse_error is None:
                 data, coverage_warnings = _enforce_outline_chapter_coverage(
@@ -2772,24 +2730,18 @@ def generate_outline_stream(
                         data["chapter_coverage"] = coverage
 
             warnings = _dedupe_warnings(warnings)
-            if warnings:
-                data["warnings"] = warnings
-            if parse_error is not None:
-                data["parse_error"] = parse_error
-            if finish_reason is not None:
-                data["finish_reason"] = finish_reason
-            if latency_ms is not None:
-                data["latency_ms"] = latency_ms
-            if dropped_params:
-                data["dropped_params"] = dropped_params
-            if generation_run_id is not None:
-                data["generation_run_id"] = generation_run_id
+            data = _apply_outline_generation_result_fields(
+                data=data,
+                warnings=warnings,
+                parse_error=parse_error,
+                finish_reason=finish_reason,
+                latency_ms=latency_ms,
+                dropped_params=dropped_params,
+                generation_run_id=generation_run_id,
+            )
 
             # Keep stream result payload compact to reduce client-side SSE parse failures on large outputs.
-            result_data = dict(data)
-            result_data.pop("raw_output", None)
-            result_data.pop("raw_json", None)
-            result_data.pop("fixed_json", None)
+            result_data = _compact_outline_stream_result_data(data)
 
             yield sse_progress(message="完成", progress=100, status="success")
             yield sse_result(result_data)
