@@ -1,4 +1,4 @@
-export const DEFAULT_ROW_HEIGHT = 48;
+export const DEFAULT_ROW_HEIGHT = 82;
 const DEFAULT_OVERSCAN = 6;
 export const DEFAULT_VIEWPORT_HEIGHT = DEFAULT_ROW_HEIGHT * 10;
 

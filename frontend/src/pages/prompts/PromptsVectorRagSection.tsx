@@ -1,10 +1,16 @@
 import type { Dispatch, SetStateAction } from "react";
 
+import { FeedbackCallout, FeedbackDisclosure, FeedbackEmptyState } from "../../components/ui/Feedback";
 import { RequestIdBadge } from "../../components/ui/RequestIdBadge";
 import { UI_COPY } from "../../lib/uiCopy";
+import {
+  formatEmbeddingSummary,
+  formatRerankMethodLabel,
+  formatRerankSummary,
+  formatVectorProviderLabel,
+} from "../../lib/vectorRagCopy";
 import type { ProjectSettings } from "../../types";
 
-import { PROMPTS_COPY } from "./promptsCopy";
 import type { VectorEmbeddingDryRunResult, VectorRagForm, VectorRerankDryRunResult } from "./models";
 
 type DryRunErrorState = {
@@ -13,10 +19,7 @@ type DryRunErrorState = {
   requestId?: string;
 };
 
-type DryRunState<T> = {
-  requestId: string;
-  result: T;
-};
+type DryRunState<T> = { requestId: string; result: T };
 
 export type PromptsVectorRagSectionProps = {
   baselineSettings: ProjectSettings | null;
@@ -105,24 +108,34 @@ export function PromptsVectorRagSection(props: PromptsVectorRagSectionProps) {
         </button>
       </div>
 
+      <div className="manuscript-status-list mt-4">
+        <span className="manuscript-chip">{baselineSettings ? "资料策略已加载" : "正在加载资料策略"}</span>
+        <span className="manuscript-chip">{vectorRagDirty ? "有未保存资料参数" : "资料参数已同步"}</span>
+        <span className="manuscript-chip">
+          {vectorApiKeyDirty || rerankApiKeyDirty ? "有未保存访问密钥" : "访问密钥未变动"}
+        </span>
+      </div>
+
+      <FeedbackCallout className="mt-4 text-xs" title="什么时候该来这里">
+        如果问题是“找不到该引用的资料”或“命中的片段不够准”，优先在这里排查；如果问题是成文语气、结构或片段顺序，就回模板库或蓝图编排台。
+      </FeedbackCallout>
+
       {baselineSettings ? (
         <div className="mt-4 grid gap-4">
-          <div className="rounded-atelier border border-border bg-canvas p-4 text-xs text-subtext">
-            <div>
-              当前生效：Embedding 提供方（provider）=
-              {baselineSettings.vector_embedding_effective_provider || "openai_compatible"}
-              （状态: {baselineSettings.vector_embedding_effective_disabled_reason ?? "enabled"}；来源:{" "}
-              {baselineSettings.vector_embedding_effective_source}）
+          <div className="grid gap-3 lg:grid-cols-3">
+            <div className="surface p-3">
+              <div className="text-xs text-subtext">资料召回</div>
+              <div className="mt-2 text-sm font-semibold text-ink">{formatEmbeddingSummary(baselineSettings)}</div>
             </div>
-            <div className="mt-1">
-              Rerank：{baselineSettings.vector_rerank_effective_enabled ? "enabled" : "disabled"}（method:{" "}
-              {baselineSettings.vector_rerank_effective_method}；provider:{" "}
-              {baselineSettings.vector_rerank_effective_provider || "（空）"}；model:{" "}
-              {baselineSettings.vector_rerank_effective_model || "（空）"}；top_k:{" "}
-              {baselineSettings.vector_rerank_effective_top_k}；alpha:{" "}
-              {baselineSettings.vector_rerank_effective_hybrid_alpha ?? 0}；来源:{" "}
-              {baselineSettings.vector_rerank_effective_source}；配置:{" "}
-              {baselineSettings.vector_rerank_effective_config_source}）
+            <div className="surface p-3">
+              <div className="text-xs text-subtext">结果排序</div>
+              <div className="mt-2 text-sm font-semibold text-ink">{formatRerankSummary(baselineSettings)}</div>
+            </div>
+            <div className="surface p-3">
+              <div className="text-xs text-subtext">什么时候该回别的页</div>
+              <div className="mt-2 text-sm font-semibold text-ink">
+                资料找不到或排序不准时留在这里；文案、风格和片段拼装问题则回提示词方案、模板库或蓝图编排台。
+              </div>
             </div>
           </div>
 
@@ -143,7 +156,7 @@ export function PromptsVectorRagSection(props: PromptsVectorRagSectionProps) {
                   onClick={onRunEmbeddingDryRun}
                   type="button"
                 >
-                  {embeddingDryRunLoading ? "测试 embedding…" : "测试 embedding"}
+                  {embeddingDryRunLoading ? "检查中…" : UI_COPY.vectorRag.dryRunEmbeddingAction}
                 </button>
                 <button
                   className="btn btn-secondary"
@@ -158,57 +171,62 @@ export function PromptsVectorRagSection(props: PromptsVectorRagSectionProps) {
                   onClick={onRunRerankDryRun}
                   type="button"
                 >
-                  {rerankDryRunLoading ? "测试 rerank…" : "测试 rerank"}
+                  {rerankDryRunLoading ? "检查中…" : UI_COPY.vectorRag.dryRunRerankAction}
                 </button>
               </div>
             </div>
             {vectorRagDirty || vectorApiKeyDirty || rerankApiKeyDirty ? (
-              <div className="mt-1 text-[11px] text-subtext">{PROMPTS_COPY.vectorRag.saveBeforeTestHint}</div>
+              <FeedbackCallout className="mt-3 text-xs" tone="warning" title="检查前先保存">
+                先保存当前资料策略，再做检查。测试只会使用“已保存”的配置。
+              </FeedbackCallout>
             ) : null}
 
             {embeddingDryRunError ? (
-              <div className="mt-3 rounded-atelier border border-border bg-surface p-3">
-                <div className="text-xs text-danger">
-                  Embedding 测试失败：{embeddingDryRunError.message} ({embeddingDryRunError.code})
+              <FeedbackCallout className="mt-3 text-xs" tone="danger" title="资料召回检查没有通过">
+                <div>
+                  {embeddingDryRunError.message} ({embeddingDryRunError.code})
                 </div>
                 <RequestIdBadge requestId={embeddingDryRunError.requestId} className="mt-2" />
                 <div className="mt-1 text-[11px] text-subtext">
-                  排障：检查 embedding base_url/model/api_key；打开后端日志并搜索 request_id。
+                  建议先检查召回服务地址、模型名和访问密钥；如果还要继续排查，再根据 request_id 查日志。
                 </div>
-              </div>
+              </FeedbackCallout>
             ) : null}
 
             {embeddingDryRun ? (
               <div className="mt-3 rounded-atelier border border-border bg-surface p-3">
                 <div className="text-xs text-subtext">
-                  Embedding：{embeddingDryRun.result.enabled ? "enabled" : "disabled"}；dims:
-                  {embeddingDryRun.result.dims ?? "（未知）"}；耗时:
+                  资料召回：{embeddingDryRun.result.enabled ? "可用" : "暂不可用"}；向量维度：
+                  {embeddingDryRun.result.dims ?? "（未知）"}；耗时：
                   {embeddingDryRun.result.timings_ms?.total ?? "（未知）"}ms
-                  {embeddingDryRun.result.error ? `；error: ${embeddingDryRun.result.error}` : ""}
+                  {embeddingDryRun.result.error ? `；返回：${embeddingDryRun.result.error}` : ""}
                 </div>
                 <RequestIdBadge requestId={embeddingDryRun.requestId} className="mt-2" />
               </div>
             ) : null}
 
             {rerankDryRunError ? (
-              <div className="mt-3 rounded-atelier border border-border bg-surface p-3">
-                <div className="text-xs text-danger">
-                  Rerank 测试失败：{rerankDryRunError.message} ({rerankDryRunError.code})
+              <FeedbackCallout className="mt-3 text-xs" tone="danger" title="结果排序检查没有通过">
+                <div>
+                  {rerankDryRunError.message} ({rerankDryRunError.code})
                 </div>
                 <RequestIdBadge requestId={rerankDryRunError.requestId} className="mt-2" />
                 <div className="mt-1 text-[11px] text-subtext">
-                  排障：检查 rerank base_url/model/api_key；若使用 external_rerank_api，确认 /v1/rerank 可访问。
+                  建议先检查重排服务地址、模型名和访问密钥；若使用外部排序接口，再确认 `/v1/rerank` 可访问。
                 </div>
-              </div>
+              </FeedbackCallout>
             ) : null}
 
             {rerankDryRun ? (
               <div className="mt-3 rounded-atelier border border-border bg-surface p-3">
                 <div className="text-xs text-subtext">
-                  Rerank：{rerankDryRun.result.enabled ? "enabled" : "disabled"}；method:
-                  {rerankDryRun.result.method ?? "（未知）"}；provider:
-                  {(rerankDryRun.result.rerank as { provider?: string } | undefined)?.provider ?? "（未知）"}；耗时:
-                  {rerankDryRun.result.timings_ms?.total ?? "（未知）"}ms；order:
+                  结果排序：{rerankDryRun.result.enabled ? "可用" : "暂不可用"}；方式：
+                  {formatRerankMethodLabel(rerankDryRun.result.method ?? "")}；服务：
+                  {formatVectorProviderLabel(
+                    (rerankDryRun.result.rerank as { provider?: string } | undefined)?.provider ?? "",
+                    "（未知）",
+                  )}；耗时：
+                  {rerankDryRun.result.timings_ms?.total ?? "（未知）"}ms；当前排序：
                   {(rerankDryRun.result.order ?? []).join(" → ") || "（空）"}
                 </div>
                 <RequestIdBadge requestId={rerankDryRun.requestId} className="mt-2" />
@@ -217,7 +235,7 @@ export function PromptsVectorRagSection(props: PromptsVectorRagSectionProps) {
           </div>
 
           <div className="grid gap-2">
-            <div className="text-sm text-ink">{UI_COPY.vectorRag.rerankTitle}</div>
+            <div className="text-sm text-ink">结果排序</div>
             <div className="grid gap-4 sm:grid-cols-3">
               <label className="flex items-center gap-2 text-sm text-ink sm:col-span-3">
                 <input
@@ -227,10 +245,10 @@ export function PromptsVectorRagSection(props: PromptsVectorRagSectionProps) {
                   type="checkbox"
                   name="vector_rerank_enabled"
                 />
-                启用 rerank（对候选片段做相关性重排）
+                启用结果排序（让候选片段更贴近当前问题）
               </label>
               <label className="grid gap-1 sm:col-span-2">
-                <span className="text-xs text-subtext">重排算法（rerank method）</span>
+                <span className="text-xs text-subtext">重排方式（method）</span>
                 <select
                   className="select"
                   value={vectorForm.vector_rerank_method}
@@ -243,7 +261,7 @@ export function PromptsVectorRagSection(props: PromptsVectorRagSectionProps) {
                 </select>
               </label>
               <label className="grid gap-1">
-                <span className="text-xs text-subtext">候选数量（top_k）</span>
+                <span className="text-xs text-subtext">候选片段数（top_k）</span>
                 <input
                   className="input"
                   type="number"
@@ -271,19 +289,19 @@ export function PromptsVectorRagSection(props: PromptsVectorRagSectionProps) {
               </label>
             </div>
             <div className="text-[11px] text-subtext">
-              提示：启用后会对候选结果做二次排序，通常命中更好，但可能增加耗时/成本。
+              提示：启用后会对候选片段做二次排序，通常命中更准，但也可能增加耗时或外部调用成本。
             </div>
           </div>
 
-          <details className="rounded-atelier border border-border bg-canvas p-4" aria-label="Rerank 提供方配置">
-            <summary className="ui-transition-fast cursor-pointer select-none text-sm text-ink hover:text-ink">
-              {UI_COPY.vectorRag.rerankConfigDetailsTitle}
-            </summary>
-            <div className="mt-4 grid gap-4">
-              <div className="text-xs text-subtext">{UI_COPY.vectorRag.backendEnvFallbackHint}</div>
+          <FeedbackDisclosure
+            className="rounded-atelier border border-border bg-canvas p-4"
+            summaryClassName="px-0 py-0 text-sm text-ink hover:text-ink"
+            bodyClassName="pt-4"
+            title={UI_COPY.vectorRag.rerankConfigDetailsTitle}
+          >
+            <div className="grid gap-4">
               <div className="text-xs text-subtext">
-                启用 external_rerank_api：method 建议保持 auto；provider 选 external_rerank_api，并填写
-                base_url/model（可选 api_key）。
+                {UI_COPY.vectorRag.backendEnvFallbackHint}
               </div>
 
               <label className="grid gap-1">
@@ -294,11 +312,11 @@ export function PromptsVectorRagSection(props: PromptsVectorRagSectionProps) {
                   onChange={(e) => setVectorForm((v) => ({ ...v, vector_rerank_provider: e.target.value }))}
                   name="vector_rerank_provider"
                 >
-                  <option value="">（使用后端环境变量）</option>
-                  <option value="external_rerank_api">external_rerank_api</option>
+                  <option value="">（沿用系统默认服务）</option>
+                  <option value="external_rerank_api">外部排序接口（external_rerank_api）</option>
                 </select>
                 <div className="text-[11px] text-subtext">
-                  当前有效：{baselineSettings.vector_rerank_effective_provider || "（空）"}
+                  当前有效：{formatVectorProviderLabel(baselineSettings.vector_rerank_effective_provider)}
                 </div>
               </label>
 
@@ -473,44 +491,44 @@ export function PromptsVectorRagSection(props: PromptsVectorRagSectionProps) {
                 </button>
               </div>
             </div>
-          </details>
+          </FeedbackDisclosure>
 
-          <details className="rounded-atelier border border-border bg-canvas p-4">
-            <summary className="ui-transition-fast cursor-pointer select-none text-sm text-ink hover:text-ink">
-              {UI_COPY.vectorRag.embeddingTitle}
-            </summary>
-            <div className="mt-4 grid gap-4">
-              <div className="text-xs text-subtext">{UI_COPY.vectorRag.backendEnvFallbackHint}</div>
+          <FeedbackDisclosure
+            className="rounded-atelier border border-border bg-canvas p-4"
+            summaryClassName="px-0 py-0 text-sm text-ink hover:text-ink"
+            bodyClassName="pt-4"
+            title={UI_COPY.vectorRag.embeddingTitle}
+          >
+            <div className="grid gap-4">
+              <div className="text-xs text-subtext">
+                {UI_COPY.vectorRag.backendEnvFallbackHint}
+              </div>
 
               <label className="grid gap-1">
-                <span className="text-xs text-subtext">
-                  Embedding 提供方（provider；项目覆盖；留空=使用后端环境变量）
-                </span>
+                <span className="text-xs text-subtext">{UI_COPY.vectorRag.embeddingProviderLabel}</span>
                 <select
                   className="select"
                   value={vectorForm.vector_embedding_provider}
                   onChange={(e) => setVectorForm((v) => ({ ...v, vector_embedding_provider: e.target.value }))}
                   name="vector_embedding_provider"
                 >
-                  <option value="">（使用后端环境变量）</option>
-                  <option value="openai_compatible">openai_compatible</option>
-                  <option value="azure_openai">azure_openai</option>
-                  <option value="google">google</option>
-                  <option value="custom">custom</option>
-                  <option value="local_proxy">local_proxy</option>
-                  <option value="sentence_transformers">sentence_transformers</option>
+                  <option value="">（沿用系统默认服务）</option>
+                  <option value="openai_compatible">通用 OpenAI 接口（openai_compatible）</option>
+                  <option value="azure_openai">Azure OpenAI（azure_openai）</option>
+                  <option value="google">Google 接口（google）</option>
+                  <option value="custom">自定义接口（custom）</option>
+                  <option value="local_proxy">本地中转服务（local_proxy）</option>
+                  <option value="sentence_transformers">本地向量模型（sentence_transformers）</option>
                 </select>
                 <div className="text-[11px] text-subtext">
-                  当前有效：{baselineSettings.vector_embedding_effective_provider || "openai_compatible"}
+                  当前有效：{formatVectorProviderLabel(baselineSettings.vector_embedding_effective_provider)}
                 </div>
               </label>
 
               {embeddingProviderPreview === "azure_openai" ? (
                 <div className="grid gap-4 sm:grid-cols-2">
                   <label className="grid gap-1">
-                    <span className="text-xs text-subtext">
-                      Azure 部署名（deployment；项目覆盖；留空=使用后端环境变量）
-                    </span>
+                    <span className="text-xs text-subtext">{UI_COPY.vectorRag.embeddingAzureDeploymentLabel}</span>
                     <input
                       className="input"
                       value={vectorForm.vector_embedding_azure_deployment}
@@ -524,9 +542,7 @@ export function PromptsVectorRagSection(props: PromptsVectorRagSectionProps) {
                     </div>
                   </label>
                   <label className="grid gap-1">
-                    <span className="text-xs text-subtext">
-                      Azure API 版本（api_version；项目覆盖；留空=使用后端环境变量）
-                    </span>
+                    <span className="text-xs text-subtext">{UI_COPY.vectorRag.embeddingAzureApiVersionLabel}</span>
                     <input
                       className="input"
                       value={vectorForm.vector_embedding_azure_api_version}
@@ -544,9 +560,7 @@ export function PromptsVectorRagSection(props: PromptsVectorRagSectionProps) {
 
               {embeddingProviderPreview === "sentence_transformers" ? (
                 <label className="grid gap-1">
-                  <span className="text-xs text-subtext">
-                    SentenceTransformers 模型（项目覆盖；留空=使用后端环境变量）
-                  </span>
+                  <span className="text-xs text-subtext">{UI_COPY.vectorRag.embeddingSentenceTransformersModelLabel}</span>
                   <input
                     className="input"
                     value={vectorForm.vector_embedding_sentence_transformers_model}
@@ -565,9 +579,7 @@ export function PromptsVectorRagSection(props: PromptsVectorRagSectionProps) {
               ) : null}
 
               <label className="grid gap-1">
-                <span className="text-xs text-subtext">
-                  Embedding 基础地址（base_url；项目覆盖；留空=使用后端环境变量）
-                </span>
+                <span className="text-xs text-subtext">{UI_COPY.vectorRag.embeddingBaseUrlLabel}</span>
                 <input
                   className="input"
                   id="vector_embedding_base_url"
@@ -581,7 +593,7 @@ export function PromptsVectorRagSection(props: PromptsVectorRagSectionProps) {
               </label>
 
               <label className="grid gap-1">
-                <span className="text-xs text-subtext">Embedding 模型（model；项目覆盖；留空=使用后端环境变量）</span>
+                <span className="text-xs text-subtext">{UI_COPY.vectorRag.embeddingModelLabel}</span>
                 <input
                   className="input"
                   id="vector_embedding_model"
@@ -595,7 +607,7 @@ export function PromptsVectorRagSection(props: PromptsVectorRagSectionProps) {
               </label>
 
               <label className="grid gap-1">
-                <span className="text-xs text-subtext">API Key（api_key；项目覆盖；留空不修改）</span>
+                <span className="text-xs text-subtext">{UI_COPY.vectorRag.embeddingApiKeyLabel}</span>
                 <input
                   className="input"
                   id="vector_embedding_api_key"
@@ -650,14 +662,19 @@ export function PromptsVectorRagSection(props: PromptsVectorRagSectionProps) {
                   }}
                   type="button"
                 >
-                  恢复使用后端环境变量（清除项目覆盖）
+                  {UI_COPY.vectorRag.embeddingResetOverrides}
                 </button>
               </div>
             </div>
-          </details>
+          </FeedbackDisclosure>
         </div>
       ) : (
-        <div className="mt-4 text-xs text-subtext">正在加载向量检索配置…</div>
+        <FeedbackEmptyState
+          className="mt-4"
+          variant="compact"
+          title="正在加载资料策略"
+          description="配置加载完成后，你就可以在这里检查召回、排序和访问密钥状态。"
+        />
       )}
     </section>
   );

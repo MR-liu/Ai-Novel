@@ -2,7 +2,9 @@ import { Link } from "react-router-dom";
 
 import { Badge } from "../../components/ui/Badge";
 import { Drawer } from "../../components/ui/Drawer";
+import { FeedbackCallout, FeedbackDisclosure, FeedbackEmptyState } from "../../components/ui/Feedback";
 import { humanizeTaskStatus } from "../../lib/humanize";
+import { buildStudioSystemPath } from "../../lib/projectRoutes";
 import { UI_COPY } from "../../lib/uiCopy";
 import type {
   ProjectTask,
@@ -65,10 +67,8 @@ export function WorldBookPageActionsBar(props: WorldBookPageActionsBarProps) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-2">
       <div className="text-sm text-subtext">
-        {UI_COPY.worldbook.entriesCountPrefix}
-        {props.filteredCount}
-        {props.filteredCount === props.totalCount ? "" : ` / ${props.totalCount}`}
-        {UI_COPY.worldbook.entriesCountSuffix}
+        当前可见 {props.filteredCount} 条资料
+        {props.filteredCount === props.totalCount ? "" : ` / 全部 ${props.totalCount} 条`}
       </div>
       <div className="flex gap-2">
         <button className="btn btn-secondary" onClick={props.onRefresh} type="button">
@@ -108,8 +108,10 @@ export function WorldBookAutoUpdateSection(props: WorldBookAutoUpdateSectionProp
     <div className="panel p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-sm text-ink">{WORLDBOOK_COPY.autoUpdateTitle}</div>
-          <div className="mt-1 text-xs text-subtext">{WORLDBOOK_COPY.autoUpdateHint}</div>
+          <div className="text-sm text-ink">章节后自动补资料</div>
+          <div className="mt-1 text-xs text-subtext">
+            写完新章节后，可以让系统根据正文提出世界资料补充建议；结果会进入任务中心，你再决定是否采纳。
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button
@@ -137,7 +139,7 @@ export function WorldBookAutoUpdateSection(props: WorldBookAutoUpdateSectionProp
             {props.actionLoading ? WORLDBOOK_COPY.autoUpdateProcessing : WORLDBOOK_COPY.autoUpdateTrigger}
           </button>
           {props.projectId ? (
-            <Link className="btn btn-secondary" to={`/projects/${props.projectId}/tasks`}>
+            <Link className="btn btn-secondary" to={buildStudioSystemPath(props.projectId, "tasks")}>
               {WORLDBOOK_COPY.autoUpdateTaskCenter}
             </Link>
           ) : (
@@ -151,18 +153,22 @@ export function WorldBookAutoUpdateSection(props: WorldBookAutoUpdateSectionProp
       <div className="mt-3">
         {props.loading ? <div className="text-xs text-subtext">{UI_COPY.common.loading}</div> : null}
         {!props.loading && !props.task ? (
-          <div className="text-xs text-subtext">{WORLDBOOK_COPY.autoUpdateEmpty}</div>
+          <FeedbackEmptyState
+            variant="compact"
+            title="还没有自动补资料任务"
+            description={WORLDBOOK_COPY.autoUpdateEmpty}
+          />
         ) : null}
         {props.task ? (
           <div className="grid gap-1 text-xs text-subtext">
             <div className="flex flex-wrap items-center gap-2">
               <Badge tone={taskStatusTone(props.task.status)}>{humanizeTaskStatus(props.task.status)}</Badge>
-              <span className="font-mono text-subtext">{props.task.kind}</span>
-              <span className="font-mono text-subtext">({props.task.id})</span>
+              <span className="text-subtext">最近一次补充任务</span>
+              <span className="font-mono text-subtext">#{props.task.id}</span>
             </div>
 
             <div className="flex flex-wrap gap-2">
-              <span>{WORLDBOOK_COPY.autoUpdateRequestId}</span>
+              <span>请求 ID（request_id）</span>
               <span className="font-mono text-ink">
                 {typeof (props.task.params as Record<string, unknown> | null)?.request_id === "string"
                   ? ((props.task.params as Record<string, unknown>).request_id as string)
@@ -171,7 +177,7 @@ export function WorldBookAutoUpdateSection(props: WorldBookAutoUpdateSectionProp
             </div>
 
             <div className="flex flex-wrap gap-2">
-              <span>{WORLDBOOK_COPY.autoUpdateChapterId}</span>
+              <span>来源章节</span>
               <span className="font-mono text-ink">
                 {typeof (props.task.params as Record<string, unknown> | null)?.chapter_id === "string"
                   ? ((props.task.params as Record<string, unknown>).chapter_id as string)
@@ -180,7 +186,7 @@ export function WorldBookAutoUpdateSection(props: WorldBookAutoUpdateSectionProp
             </div>
 
             <div className="flex flex-wrap gap-2">
-              <span>{WORLDBOOK_COPY.autoUpdateRunId}</span>
+              <span>生成记录</span>
               <span className="font-mono text-ink">
                 {typeof (props.task.result as Record<string, unknown> | null)?.run_id === "string"
                   ? ((props.task.result as Record<string, unknown>).run_id as string)
@@ -191,7 +197,7 @@ export function WorldBookAutoUpdateSection(props: WorldBookAutoUpdateSectionProp
             {typeof (props.task.result as Record<string, unknown> | null)?.applied === "object" &&
             (props.task.result as Record<string, unknown>).applied ? (
               <div className="flex flex-wrap gap-2">
-                <span>{WORLDBOOK_COPY.autoUpdateApplied}</span>
+                <span>采纳结果摘要</span>
                 <span className="font-mono text-ink">
                   {JSON.stringify((props.task.result as Record<string, unknown>).applied)}
                 </span>
@@ -199,10 +205,10 @@ export function WorldBookAutoUpdateSection(props: WorldBookAutoUpdateSectionProp
             ) : null}
 
             {props.task.status === "failed" ? (
-              <div className="text-xs text-danger">
+              <FeedbackCallout className="mt-2 text-xs" tone="danger" title="最近一次自动补资料失败">
                 {props.task.error_type ? `${props.task.error_type}: ` : ""}
                 {props.task.error_message || WORLDBOOK_COPY.autoUpdateFailedFallback}
-              </div>
+              </FeedbackCallout>
             ) : null}
           </div>
         ) : null}
@@ -256,8 +262,10 @@ export type WorldBookEntriesSectionProps = {
 export function WorldBookEntriesSection(props: WorldBookEntriesSectionProps) {
   return (
     <div className="panel p-4">
-      <div className="text-sm text-ink">{UI_COPY.worldbook.entriesTitle}</div>
-      <div className="mt-1 text-xs text-subtext">{UI_COPY.worldbook.entriesHint}</div>
+      <div className="text-sm text-ink">资料词条清单</div>
+      <div className="mt-1 text-xs text-subtext">
+        先筛选、排序并浏览词条，再打开单条编辑台。批量模式适合一起启用、停用或统一调整优先级。
+      </div>
 
       {props.loading ? <div className="mt-3 text-sm text-subtext">{UI_COPY.common.loading}</div> : null}
 
@@ -305,6 +313,9 @@ export function WorldBookEntriesSection(props: WorldBookEntriesSectionProps) {
 
       {props.bulkMode ? (
         <div className="mt-4 rounded-atelier border border-border bg-canvas p-3">
+          <div className="mb-3 rounded-atelier border border-border bg-surface p-3 text-sm text-subtext">
+            批量整理适合一次性处理一批词条，例如统一停用旧资料、整体抬高优先级，或给同一批资料补上字数限制。
+          </div>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="text-xs text-subtext">
               {UI_COPY.worldbook.bulkSelectedPrefix}
@@ -551,16 +562,15 @@ export function WorldBookEntriesSection(props: WorldBookEntriesSectionProps) {
 export function WorldBookPreviewPanel(props: PreviewPanelProps) {
   const inputPrefix = props.variant === "page" ? "worldbook" : "worldbook_entry";
   const cardSurfaceClassName = props.variant === "page" ? "bg-surface" : "bg-canvas";
-  const errorSurfaceClassName = props.variant === "page" ? "bg-surface" : "bg-canvas";
 
   return (
     <>
       <div className="flex items-center justify-between gap-2">
         <div>
-          <div className="text-sm text-ink">{UI_COPY.worldbook.previewTitle}</div>
+          <div className="text-sm text-ink">写作命中预览</div>
           <div className="mt-1 text-xs text-subtext">
-            {UI_COPY.worldbook.previewHint}
-            {props.requestId ? <span className="ml-2">request_id: {props.requestId}</span> : null}
+            输入一段正文、章节计划或摘要，检查世界资料会命中哪些词条。
+            {props.requestId ? <span className="ml-2">请求 ID（request_id）: {props.requestId}</span> : null}
           </div>
         </div>
         <div className="grid justify-items-end gap-1">
@@ -586,8 +596,8 @@ export function WorldBookPreviewPanel(props: PreviewPanelProps) {
       </div>
 
       <div className="mt-4 grid gap-3">
-        <label className="grid gap-1">
-          <span className="text-xs text-subtext">{UI_COPY.worldbook.previewQueryLabel}</span>
+          <label className="grid gap-1">
+          <span className="text-xs text-subtext">测试正文 / 摘要</span>
           <textarea
             id={`${inputPrefix}_preview_query_text`}
             className="textarea atelier-content"
@@ -600,7 +610,7 @@ export function WorldBookPreviewPanel(props: PreviewPanelProps) {
 
         <div className="grid gap-2 sm:grid-cols-2">
           <label className="flex items-center justify-between gap-2 text-sm text-ink">
-            <span>{UI_COPY.worldbook.previewIncludeConstant}</span>
+            <span>包含常驻资料</span>
             <input
               id={`${inputPrefix}_preview_include_constant`}
               className="checkbox"
@@ -611,7 +621,7 @@ export function WorldBookPreviewPanel(props: PreviewPanelProps) {
             />
           </label>
           <label className="flex items-center justify-between gap-2 text-sm text-ink">
-            <span>{UI_COPY.worldbook.previewEnableRecursion}</span>
+            <span>允许递归命中</span>
             <input
               id={`${inputPrefix}_preview_enable_recursion`}
               className="checkbox"
@@ -622,7 +632,7 @@ export function WorldBookPreviewPanel(props: PreviewPanelProps) {
             />
           </label>
           <label className="grid gap-1 sm:col-span-2">
-            <span className="text-xs text-subtext">{UI_COPY.worldbook.previewCharLimit}</span>
+            <span className="text-xs text-subtext">预览最大字数</span>
             <input
               id={`${inputPrefix}_preview_char_limit`}
               className="input"
@@ -637,22 +647,23 @@ export function WorldBookPreviewPanel(props: PreviewPanelProps) {
 
         {props.loading ? <div className="text-sm text-subtext">{UI_COPY.common.loading}</div> : null}
         {props.error ? (
-          <div className={`rounded-atelier border border-border ${errorSurfaceClassName} p-3 text-sm text-subtext`}>
-            <div className="text-ink">{UI_COPY.worldbook.previewFailed}</div>
-            <div className="mt-1 text-xs text-subtext">
+          <FeedbackCallout tone="danger" title={UI_COPY.worldbook.previewFailed}>
+            <div className="text-xs">
               {props.error.message} ({props.error.code})
-              {props.error.requestId ? <span className="ml-2">request_id: {props.error.requestId}</span> : null}
+              {props.error.requestId ? (
+                <span className="ml-2">请求 ID（request_id）: {props.error.requestId}</span>
+              ) : null}
             </div>
-          </div>
+          </FeedbackCallout>
         ) : null}
 
         {props.result ? (
           <div className="grid gap-2">
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-subtext">
               <span>
-                {UI_COPY.worldbook.previewTriggeredPrefix}
+                本次命中
                 {props.result.triggered.length}
-                {UI_COPY.worldbook.previewTriggeredSuffix}
+                条资料
               </span>
               {props.result.truncated ? (
                 <Badge className="shrink-0" tone="warning">
@@ -660,13 +671,20 @@ export function WorldBookPreviewPanel(props: PreviewPanelProps) {
                 </Badge>
               ) : null}
             </div>
-            <details open={props.triggeredListOpenByDefault}>
-              <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                {UI_COPY.worldbook.previewTriggeredList}
-              </summary>
+            <FeedbackDisclosure
+              defaultOpen={props.triggeredListOpenByDefault}
+              className="rounded-atelier border border-border bg-canvas px-3 py-2"
+              summaryClassName="text-xs text-subtext hover:text-ink"
+              bodyClassName="pt-2"
+              title="命中的资料条目"
+            >
               <div className="mt-2 grid gap-2">
                 {props.result.triggered.length === 0 ? (
-                  <div className="text-sm text-subtext">{UI_COPY.worldbook.previewNoTriggered}</div>
+                  <FeedbackEmptyState
+                    variant="compact"
+                    title="这次没有命中世界资料"
+                    description={UI_COPY.worldbook.previewNoTriggered}
+                  />
                 ) : (
                   props.result.triggered.map((entry) => (
                     <div
@@ -677,7 +695,7 @@ export function WorldBookPreviewPanel(props: PreviewPanelProps) {
                         <div className="min-w-0">
                           <div className="truncate text-ink">{entry.title}</div>
                           <div className="mt-1 text-subtext">
-                            {entry.reason} | priority:{entry.priority}
+                            命中原因：{entry.reason} · 优先级 {entry.priority}
                           </div>
                         </div>
                       </div>
@@ -685,17 +703,20 @@ export function WorldBookPreviewPanel(props: PreviewPanelProps) {
                   ))
                 )}
               </div>
-            </details>
-            <details open>
-              <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                {UI_COPY.worldbook.previewText}
-              </summary>
+            </FeedbackDisclosure>
+            <FeedbackDisclosure
+              defaultOpen
+              className="rounded-atelier border border-border bg-canvas px-3 py-2"
+              summaryClassName="text-xs text-subtext hover:text-ink"
+              bodyClassName="pt-2"
+              title="拼接后的参考正文"
+            >
               <pre
                 className={`mt-2 max-h-64 overflow-auto rounded-atelier border border-border ${cardSurfaceClassName} p-3 text-xs text-ink`}
               >
                 {props.result.text_md || UI_COPY.worldbook.previewTextEmpty}
               </pre>
-            </details>
+            </FeedbackDisclosure>
           </div>
         ) : null}
       </div>
@@ -727,8 +748,10 @@ export function WorldBookImportDrawer(props: WorldBookImportDrawerProps) {
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="font-content text-2xl text-ink">{WORLDBOOK_COPY.importDrawerTitle}</div>
-          <div className="mt-1 text-xs text-subtext">{WORLDBOOK_COPY.importDrawerHint}</div>
+          <div className="font-content text-2xl text-ink">导入世界资料 JSON</div>
+          <div className="mt-1 text-xs text-subtext">
+            适合把另一份世界书资料并入当前项目。建议先 dry run 看看会新建、覆盖还是冲突，再决定是否真正导入。
+          </div>
         </div>
         <button className="btn btn-secondary" disabled={props.loading} onClick={props.onClose} type="button">
           {UI_COPY.worldbook.close}
@@ -736,9 +759,9 @@ export function WorldBookImportDrawer(props: WorldBookImportDrawerProps) {
       </div>
 
       <div className="mt-5 grid gap-4">
-        <div className="surface p-4">
-          <div className="text-sm text-ink">{WORLDBOOK_COPY.importFileTitle}</div>
-          <div className="mt-3 grid gap-3">
+          <div className="surface p-4">
+            <div className="text-sm text-ink">{WORLDBOOK_COPY.importFileTitle}</div>
+            <div className="mt-3 grid gap-3">
             <label className="grid gap-1">
               <span className="text-xs text-subtext">{WORLDBOOK_COPY.importFileLabel}</span>
               <input
@@ -767,6 +790,7 @@ export function WorldBookImportDrawer(props: WorldBookImportDrawerProps) {
             </label>
 
             <div className="text-[11px] text-subtext">{WORLDBOOK_COPY.importModeHint}</div>
+            <div className="text-[11px] text-subtext">建议先做一次预演导入，再真正应用，避免把旧资料直接覆盖掉。</div>
 
             {props.fileName ? (
               <div className="text-xs text-subtext">
@@ -790,7 +814,7 @@ export function WorldBookImportDrawer(props: WorldBookImportDrawerProps) {
                 onClick={props.onDryRun}
                 type="button"
               >
-                {props.loading ? WORLDBOOK_COPY.importProcessing : WORLDBOOK_COPY.importDryRunButton}
+                {props.loading ? WORLDBOOK_COPY.importProcessing : "先预演导入"}
               </button>
               <button
                 className="btn btn-primary"
@@ -798,7 +822,7 @@ export function WorldBookImportDrawer(props: WorldBookImportDrawerProps) {
                 onClick={props.onApply}
                 type="button"
               >
-                {props.loading ? WORLDBOOK_COPY.importApplying : WORLDBOOK_COPY.importApplyButton}
+                {props.loading ? WORLDBOOK_COPY.importApplying : "确认导入资料"}
               </button>
             </div>
           </div>
@@ -808,45 +832,52 @@ export function WorldBookImportDrawer(props: WorldBookImportDrawerProps) {
           <div className="surface p-4">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="text-sm text-ink">{WORLDBOOK_COPY.importReportTitle}</div>
+                <div className="text-sm text-ink">导入结果预览</div>
                 <div className="mt-1 text-xs text-subtext">
-                  dry_run: {String(props.report.dry_run)} | mode: {props.report.mode}
+                  本次仅预演（dry_run）：{String(props.report.dry_run)} | 导入方式（mode）：{props.report.mode}
                 </div>
-                <div className="mt-1 text-[11px] text-subtext">{WORLDBOOK_COPY.importReportExplain}</div>
+                <div className="mt-1 text-[11px] text-subtext">先看统计，再重点检查冲突和具体动作。</div>
               </div>
             </div>
 
             <div className="mt-3 grid gap-1 text-xs text-subtext">
               <div>
-                created: <span className="text-ink">{props.report.created}</span> | updated:{" "}
-                <span className="text-ink">{props.report.updated}</span> | deleted:{" "}
-                <span className="text-ink">{props.report.deleted}</span> | skipped:{" "}
+                新建 <span className="text-ink">{props.report.created}</span> | 更新{" "}
+                <span className="text-ink">{props.report.updated}</span> | 删除{" "}
+                <span className="text-ink">{props.report.deleted}</span> | 跳过{" "}
                 <span className="text-ink">{props.report.skipped}</span>
               </div>
-              <div className="text-[11px] text-subtext">{WORLDBOOK_COPY.importReportCountsExplain}</div>
+              <div className="text-[11px] text-subtext">这些统计只说明会发生什么，真正应用前不会改动现有词条。</div>
               <div>
-                conflicts: <span className="text-ink">{props.report.conflicts?.length ?? 0}</span> | actions:{" "}
+                冲突项 <span className="text-ink">{props.report.conflicts?.length ?? 0}</span> | 变更项{" "}
                 <span className="text-ink">{props.report.actions?.length ?? 0}</span>
               </div>
             </div>
 
-            <details className="mt-3" open>
-              <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                {WORLDBOOK_COPY.importReportConflicts}({props.report.conflicts?.length ?? 0})
-              </summary>
+            <FeedbackDisclosure
+              className="mt-3 rounded-atelier border border-border bg-surface px-3 py-2"
+              summaryClassName="text-xs text-subtext hover:text-ink"
+              bodyClassName="pt-2"
+              defaultOpen
+              title={`${WORLDBOOK_COPY.importReportConflicts}(${props.report.conflicts?.length ?? 0})`}
+            >
+              <div className="text-xs text-subtext">这里保留原始 JSON，主要用于排查哪些旧词条会冲突；正常情况下先看上面的统计即可。</div>
               <pre className="mt-2 max-h-64 overflow-auto rounded-atelier border border-border bg-surface p-3 text-xs text-ink">
                 {JSON.stringify(props.report.conflicts ?? [], null, 2)}
               </pre>
-            </details>
+            </FeedbackDisclosure>
 
-            <details className="mt-3">
-              <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                {WORLDBOOK_COPY.importReportActions}({props.report.actions?.length ?? 0})
-              </summary>
+            <FeedbackDisclosure
+              className="mt-3 rounded-atelier border border-border bg-surface px-3 py-2"
+              summaryClassName="text-xs text-subtext hover:text-ink"
+              bodyClassName="pt-2"
+              title={`${WORLDBOOK_COPY.importReportActions}(${props.report.actions?.length ?? 0})`}
+            >
+              <div className="text-xs text-subtext">这里展示原始 JSON 变更明细，适合在导入前确认系统准备新增、更新或删除哪些词条。</div>
               <pre className="mt-2 max-h-64 overflow-auto rounded-atelier border border-border bg-surface p-3 text-xs text-ink">
                 {JSON.stringify(props.report.actions ?? [], null, 2)}
               </pre>
-            </details>
+            </FeedbackDisclosure>
           </div>
         ) : null}
       </div>
@@ -879,9 +910,9 @@ export function WorldBookEditorDrawer(props: WorldBookEditorDrawerProps) {
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="font-content text-2xl text-ink">{UI_COPY.worldbook.drawerTitle}</div>
+          <div className="font-content text-2xl text-ink">{props.editing ? "资料词条编辑台" : "新建资料词条"}</div>
           <div className="mt-1 text-xs text-subtext">
-            {props.editing ? props.editing.id : UI_COPY.worldbook.newEntryHint}
+            {props.editing ? `正在编辑：${props.editing.title}` : "先写标题和内容，再用上方预览确认会不会在写作时正确命中。"}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -911,8 +942,12 @@ export function WorldBookEditorDrawer(props: WorldBookEditorDrawerProps) {
           <WorldBookPreviewPanel {...props.previewPanelProps} variant="drawer" />
         </div>
 
+        <div className="rounded-atelier border border-border bg-canvas p-4 text-sm text-subtext">
+          常驻资料适合写不会轻易变化的设定；关键词决定它在什么文本里更容易被命中；优先级和字数上限决定它在上下文里的存在感。
+        </div>
+
         <label className="grid gap-1">
-          <span className="text-xs text-subtext">{UI_COPY.worldbook.formTitle}</span>
+          <span className="text-xs text-subtext">资料标题</span>
           <input
             id="worldbook_entry_title"
             className="input"
@@ -925,7 +960,7 @@ export function WorldBookEditorDrawer(props: WorldBookEditorDrawerProps) {
 
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="flex items-center justify-between gap-2 text-sm text-ink">
-            <span>{UI_COPY.worldbook.formEnabled}</span>
+            <span>启用这条资料</span>
             <input
               id="worldbook_entry_enabled"
               className="checkbox"
@@ -937,7 +972,7 @@ export function WorldBookEditorDrawer(props: WorldBookEditorDrawerProps) {
             />
           </label>
           <label className="flex items-center justify-between gap-2 text-sm text-ink">
-            <span>{UI_COPY.worldbook.formConstant}</span>
+            <span>设为常驻资料</span>
             <input
               id="worldbook_entry_constant"
               className="checkbox"
@@ -949,7 +984,7 @@ export function WorldBookEditorDrawer(props: WorldBookEditorDrawerProps) {
             />
           </label>
           <label className="flex items-center justify-between gap-2 text-sm text-ink">
-            <span>{UI_COPY.worldbook.formExcludeRecursion}</span>
+            <span>排除递归引用</span>
             <input
               id="worldbook_entry_exclude_recursion"
               className="checkbox"
@@ -961,7 +996,7 @@ export function WorldBookEditorDrawer(props: WorldBookEditorDrawerProps) {
             />
           </label>
           <label className="flex items-center justify-between gap-2 text-sm text-ink">
-            <span>{UI_COPY.worldbook.formPreventRecursion}</span>
+            <span>阻止后续递归</span>
             <input
               id="worldbook_entry_prevent_recursion"
               className="checkbox"
@@ -973,7 +1008,7 @@ export function WorldBookEditorDrawer(props: WorldBookEditorDrawerProps) {
             />
           </label>
           <label className="grid gap-1 sm:col-span-2">
-            <span className="text-xs text-subtext">{UI_COPY.worldbook.formKeywords}</span>
+            <span className="text-xs text-subtext">命中关键词</span>
             <textarea
               id="worldbook_entry_keywords"
               className="textarea atelier-content"
@@ -983,10 +1018,10 @@ export function WorldBookEditorDrawer(props: WorldBookEditorDrawerProps) {
               value={props.form.keywords_raw}
               onChange={(event) => props.onUpdateForm({ keywords_raw: event.target.value })}
             />
-            <div className="text-[11px] text-subtext">{UI_COPY.worldbook.formKeywordsHint}</div>
+            <div className="text-[11px] text-subtext">写会在正文里出现的称呼、地点、组织名或同义词，能显著提高命中稳定性。</div>
           </label>
           <label className="grid gap-1">
-            <span className="text-xs text-subtext">{UI_COPY.worldbook.formCharLimit}</span>
+            <span className="text-xs text-subtext">单条最大字数</span>
             <input
               id="worldbook_entry_char_limit"
               className="input"
@@ -999,7 +1034,7 @@ export function WorldBookEditorDrawer(props: WorldBookEditorDrawerProps) {
             />
           </label>
           <label className="grid gap-1">
-            <span className="text-xs text-subtext">{UI_COPY.worldbook.formPriority}</span>
+            <span className="text-xs text-subtext">命中优先级</span>
             <select
               id="worldbook_entry_priority"
               className="select"
@@ -1018,7 +1053,7 @@ export function WorldBookEditorDrawer(props: WorldBookEditorDrawerProps) {
         </div>
 
         <label className="grid gap-1">
-          <span className="text-xs text-subtext">{UI_COPY.worldbook.formContent}</span>
+          <span className="text-xs text-subtext">资料正文</span>
           <textarea
             id="worldbook_entry_content_md"
             className="textarea atelier-content"

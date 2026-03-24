@@ -1,3 +1,4 @@
+import { Badge } from "../../components/ui/Badge";
 import { humanizeChangeSetStatus, humanizeTaskStatus } from "../../lib/humanize";
 
 type StatusBadgeProps = {
@@ -15,14 +16,7 @@ function statusTone(status: string): "ok" | "warn" | "bad" | "info" {
 
 export function StatusBadge(props: StatusBadgeProps) {
   const tone = statusTone(props.status);
-  const cls =
-    tone === "bad"
-      ? "bg-danger/10 text-danger"
-      : tone === "warn"
-        ? "bg-warning/10 text-warning"
-        : tone === "info"
-          ? "bg-info/10 text-info"
-          : "bg-success/10 text-success";
+  const badgeTone = tone === "bad" ? "danger" : tone === "warn" ? "warning" : tone === "info" ? "info" : "success";
   const label = props.kind === "change_set" ? humanizeChangeSetStatus(props.status) : humanizeTaskStatus(props.status);
-  return <span className={`inline-flex rounded px-2 py-0.5 text-[11px] ${cls}`}>{label}</span>;
+  return <Badge tone={badgeTone}>{label}</Badge>;
 }

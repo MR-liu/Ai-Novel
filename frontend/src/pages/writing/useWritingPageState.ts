@@ -1,16 +1,15 @@
 import type { ComponentProps } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { WizardNextBar } from "../../components/atelier/WizardNextBar";
 import { useConfirm } from "../../components/ui/confirm";
 import { useToast } from "../../components/ui/toast";
+import { useAppMode } from "../../contexts/AppModeContext";
 import { usePersistentOutletIsActive } from "../../hooks/usePersistentOutlet";
-import { useProjectData } from "../../hooks/useProjectData";
 import { useWizardProgress } from "../../hooks/useWizardProgress";
+import { buildProjectReviewPath } from "../../lib/projectRoutes";
 import { ApiError, apiJson } from "../../services/apiClient";
-import { getWizardProjectChangedAt } from "../../services/wizard";
-import type { Character, LLMPreset, Outline, OutlineListItem } from "../../types";
 
 import type {
   WritingChapterListDrawerProps,
@@ -25,8 +24,11 @@ import { useChapterAnalysis } from "./useChapterAnalysis";
 import { useChapterCrud } from "./useChapterCrud";
 import { useChapterEditor } from "./useChapterEditor";
 import { useChapterGeneration } from "./useChapterGeneration";
+import { useContinuityRevisionState } from "./useContinuityRevisionState";
 import { useGenerationHistory } from "./useGenerationHistory";
 import { useOutlineSwitcher } from "./useOutlineSwitcher";
+import { useWritingProjectQueryState } from "./useWritingProjectQueryState";
+import { useWritingUiState } from "./useWritingUiState";
 import type { ChapterForm } from "./writingUtils";
 import {
   buildBatchTaskCenterHref,
@@ -42,13 +44,6 @@ import {
   getWritingNextChapterReplaceTitle,
   WRITING_PAGE_COPY,
 } from "./writingPageCopy";
-
-type WritingLoaded = {
-  outlines: OutlineListItem[];
-  outline: Outline;
-  preset: LLMPreset;
-  characters: Character[];
-};
 
 export type WritingPageState = {
   loading: boolean;
@@ -69,46 +64,40 @@ export function useWritingPageState(): WritingPageState {
   const navigate = useNavigate();
   const toast = useToast();
   const confirm = useConfirm();
+  const { mode } = useAppMode();
+  const appMode = mode ?? "focus";
   const outletActive = usePersistentOutletIsActive();
   const wizard = useWizardProgress(projectId);
   const refreshWizard = wizard.refresh;
   const bumpWizardLocal = wizard.bumpLocal;
-  const lastProjectChangedAtRef = useRef<string | null>(null);
-
-  const [chapterListOpen, setChapterListOpen] = useState(false);
-  const [contentEditorTab, setContentEditorTab] = useState<"edit" | "preview">("edit");
-  const contentTextareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const autoGenerateNextRef = useRef<{ chapterId: string; mode: "replace" | "append" } | null>(null);
-
-  const [aiOpen, setAiOpen] = useState(false);
-  const [promptInspectorOpen, setPromptInspectorOpen] = useState(false);
-  const [postEditCompareOpen, setPostEditCompareOpen] = useState(false);
-  const [contentOptimizeCompareOpen, setContentOptimizeCompareOpen] = useState(false);
-  const [tablesOpen, setTablesOpen] = useState(false);
-  const [contextPreviewOpen, setContextPreviewOpen] = useState(false);
-  const [memoryUpdateOpen, setMemoryUpdateOpen] = useState(false);
-  const [foreshadowOpen, setForeshadowOpen] = useState(false);
-  const [autoUpdatesTriggering, setAutoUpdatesTriggering] = useState(false);
-
-  const writingQuery = useProjectData<WritingLoaded>(projectId, async (id) => {
-    const [outlineRes, presetRes, charactersRes] = await Promise.all([
-      apiJson<{ outline: Outline }>(`/api/projects/${id}/outline`),
-      apiJson<{ llm_preset: LLMPreset }>(`/api/projects/${id}/llm_preset`),
-      apiJson<{ characters: Character[] }>(`/api/projects/${id}/characters`),
-    ]);
-    const outlinesRes = await apiJson<{ outlines: OutlineListItem[] }>(`/api/projects/${id}/outlines`);
-    return {
-      outlines: outlinesRes.data.outlines,
-      outline: outlineRes.data.outline,
-      preset: presetRes.data.llm_preset,
-      characters: charactersRes.data.characters,
-    };
-  });
-  const outlines = writingQuery.data?.outlines ?? [];
-  const outline = writingQuery.data?.outline ?? null;
-  const characters = writingQuery.data?.characters ?? [];
-  const preset = writingQuery.data?.preset ?? null;
-  const refreshWriting = writingQuery.refresh;
+  const {
+    chapterListOpen,
+    setChapterListOpen,
+    contentEditorTab,
+    setContentEditorTab,
+    contentTextareaRef,
+    autoGenerateNextRef,
+    aiOpen,
+    setAiOpen,
+    studioToolsOpen,
+    setStudioToolsOpen,
+    promptInspectorOpen,
+    setPromptInspectorOpen,
+    postEditCompareOpen,
+    setPostEditCompareOpen,
+    contentOptimizeCompareOpen,
+    setContentOptimizeCompareOpen,
+    tablesOpen,
+    setTablesOpen,
+    contextPreviewOpen,
+    setContextPreviewOpen,
+    memoryUpdateOpen,
+    setMemoryUpdateOpen,
+    foreshadowOpen,
+    setForeshadowOpen,
+    autoUpdatesTriggering,
+    setAutoUpdatesTriggering,
+  } = useWritingUiState(appMode);
 
   const chapterEditor = useChapterEditor({
     projectId,
@@ -136,24 +125,13 @@ export function useWritingPageState(): WritingPageState {
     loadingChapter,
     saving,
   } = chapterEditor;
-
-  useEffect(() => {
-    if (!projectId) {
-      lastProjectChangedAtRef.current = null;
-      return;
-    }
-    lastProjectChangedAtRef.current = getWizardProjectChangedAt(projectId);
-  }, [projectId]);
-
-  useEffect(() => {
-    if (!projectId || !outletActive || dirty) return;
-    const changedAt = getWizardProjectChangedAt(projectId);
-    if ((changedAt ?? null) === (lastProjectChangedAtRef.current ?? null)) return;
-    lastProjectChangedAtRef.current = changedAt;
-    void refreshWriting();
-    void refreshChapters();
-    void refreshWizard();
-  }, [dirty, outletActive, projectId, refreshChapters, refreshWriting, refreshWizard]);
+  const { outlines, outline, preset, characters, refreshWriting } = useWritingProjectQueryState({
+    projectId,
+    outletActive,
+    dirty,
+    refreshChapters,
+    refreshWizard,
+  });
 
   useEffect(() => {
     if (!activeChapter) autoGenerateNextRef.current = null;
@@ -248,35 +226,35 @@ export function useWritingPageState(): WritingPageState {
     refreshChapters,
     refreshWriting,
   });
-
-  const locateInEditor = useCallback(
-    (excerpt: string) => {
-      if (!excerpt || !form) return;
-      const needleRaw = excerpt.trim();
-      if (!needleRaw) return;
-
-      const haystack = form.content_md ?? "";
-      let needle = needleRaw;
-      let index = haystack.indexOf(needle);
-      if (index < 0 && needle.length > 20) {
-        needle = needle.slice(0, 20);
-        index = haystack.indexOf(needle);
-      }
-      if (index < 0) {
-        toast.toastError(WRITING_PAGE_COPY.locateExcerptFailed);
-        return;
-      }
-
-      setContentEditorTab("edit");
-      window.requestAnimationFrame(() => {
-        const element = contentTextareaRef.current;
-        if (!element) return;
-        element.focus();
-        element.setSelectionRange(index, Math.min(haystack.length, index + needle.length));
-      });
-    },
-    [form, toast],
-  );
+  const {
+    activeContinuityRevision,
+    activeContinuityRevisionProgressStatus,
+    continuityRevisionChecklist,
+    continuityRevisionQueueView,
+    continuityRevisionQueueNavigation,
+    returnToContinuityAfterComplete,
+    setReturnToContinuityAfterComplete,
+    locateContinuityRevision,
+    returnToContinuityReview,
+    clearContinuityRevision,
+    activateContinuityRevisionQueueItem,
+    removeContinuityRevisionQueueItem,
+    activatePreviousContinuityRevision,
+    activateNextContinuityRevision,
+    completeContinuityRevisionAndAdvance,
+    locateInEditor,
+  } = useContinuityRevisionState({
+    projectId,
+    activeChapter,
+    form,
+    dirty,
+    searchParams,
+    setSearchParams,
+    navigate,
+    toast,
+    setContentEditorTab,
+    contentTextareaRef,
+  });
 
   const saveAndTriggerAutoUpdates = useCallback(async () => {
     if (!projectId || !activeChapter || autoUpdatesTriggering || !dirty) return;
@@ -361,40 +339,63 @@ export function useWritingPageState(): WritingPageState {
     void generate(pending.mode);
   }, [activeChapter, form, generate, generating]);
 
+  const batchProgressText =
+    batch.batchTask && (batch.batchTask.status === "queued" || batch.batchTask.status === "running")
+      ? `（${batch.batchTask.completed_count}/${batch.batchTask.total_count}）`
+      : "";
+
+  const openMemoryUpdate = useCallback(() => {
+    if (!activeChapter) return;
+    if (dirty) {
+      toast.toastWarning(WRITING_PAGE_COPY.memoryUpdateNeedsSaveFirst);
+      return;
+    }
+    if (activeChapter.status !== "done") {
+      toast.toastWarning(getWritingDoneOnlyWarning());
+      return;
+    }
+    setMemoryUpdateOpen(true);
+  }, [activeChapter, dirty, toast]);
+
+  const openTaskCenter = useCallback(() => {
+    if (!projectId) return;
+    navigate(buildWritingTaskCenterHref(projectId, activeId));
+  }, [activeId, navigate, projectId]);
+
+  const hasActiveChapter = Boolean(activeChapter);
+  const hasChapters = chapters.length > 0;
+  const hasPlan = Boolean(String(form?.plan || "").trim());
+  const hasContent = Boolean(String(form?.content_md || "").trim());
+  const continuityRevisionActive = Boolean(activeContinuityRevision);
+
   const workspaceProps: WritingWorkspaceProps = {
     toolbarProps: {
+      appMode,
       outlines,
       activeOutlineId,
       chaptersCount: chapters.length,
-      batchProgressText:
-        batch.batchTask && (batch.batchTask.status === "queued" || batch.batchTask.status === "running")
-          ? `（${batch.batchTask.completed_count}/${batch.batchTask.total_count}）`
-          : "",
-      aiGenerateDisabled: !activeChapter || loadingChapter,
+      aiGenerateDisabled: !hasActiveChapter || loadingChapter,
+      saveDisabled: !dirty || saving || loadingChapter || generating,
+      saveLabel: saving ? WRITING_PAGE_COPY.saving : WRITING_PAGE_COPY.save,
       onSwitchOutline: (outlineId) => void switchOutline(outlineId),
-      onOpenBatch: batch.openModal,
-      onOpenHistory: history.openDrawer,
       onOpenAiGenerate: () => setAiOpen(true),
-      onOpenMemoryUpdate: () => {
-        if (!activeChapter) return;
-        if (dirty) {
-          toast.toastWarning(WRITING_PAGE_COPY.memoryUpdateNeedsSaveFirst);
-          return;
-        }
-        if (activeChapter.status !== "done") {
-          toast.toastWarning(getWritingDoneOnlyWarning());
-          return;
-        }
-        setMemoryUpdateOpen(true);
-      },
-      onOpenTaskCenter: () => {
-        if (!projectId) return;
-        navigate(buildWritingTaskCenterHref(projectId, activeId));
-      },
-      onOpenForeshadow: () => setForeshadowOpen(true),
-      onOpenTables: () => setTablesOpen(true),
-      onOpenContextPreview: () => setContextPreviewOpen(true),
       onCreateChapter: chapterCrud.openCreate,
+      onSaveChapter: () => void saveChapter(),
+      onOpenReview: () => {
+        if (!projectId) return;
+        navigate(buildProjectReviewPath(projectId));
+      },
+      onOpenStudioTools: () => setStudioToolsOpen(true),
+    },
+    workbenchProps: {
+      batchProgressText,
+      onOpenPromptInspector: () => setPromptInspectorOpen(true),
+      onOpenContextPreview: () => setContextPreviewOpen(true),
+      onOpenHistory: history.openDrawer,
+      onOpenMemoryUpdate: openMemoryUpdate,
+      onOpenForeshadow: () => setForeshadowOpen(true),
+      onOpenTaskCenter: openTaskCenter,
+      onOpenStudioTools: () => setStudioToolsOpen(true),
     },
     chapterListProps: {
       chapters,
@@ -403,7 +404,9 @@ export function useWritingPageState(): WritingPageState {
       onOpenDrawer: () => setChapterListOpen(true),
     },
     editorProps: {
+      appMode,
       activeChapter,
+      hasChapters,
       form,
       dirty,
       isDoneReadonly,
@@ -411,6 +414,20 @@ export function useWritingPageState(): WritingPageState {
       generating,
       saving,
       autoUpdatesTriggering,
+      continuityRevision: activeContinuityRevision
+        ? {
+            id: activeContinuityRevision.id,
+            title: activeContinuityRevision.title,
+            typeLabel: activeContinuityRevision.typeLabel,
+            excerpt: activeContinuityRevision.excerpt,
+            hasExcerpt: activeContinuityRevision.hasExcerpt,
+            progressStatus: activeContinuityRevisionProgressStatus,
+          }
+        : null,
+      continuityRevisionChecklist,
+      continuityRevisionQueue: continuityRevisionQueueView,
+      continuityRevisionQueueNavigation,
+      returnToContinuityAfterComplete,
       contentEditorTab,
       onContentEditorTabChange: setContentEditorTab,
       onTitleChange: (value) => setForm((prev) => (prev ? { ...prev, title: value } : prev)),
@@ -426,10 +443,21 @@ export function useWritingPageState(): WritingPageState {
         if (!projectId || !activeChapter) return;
         navigate(getWritingAnalysisHref(projectId, activeChapter.id));
       },
+      onOpenChapterList: () => setChapterListOpen(true),
+      onCreateChapter: chapterCrud.openCreate,
       onDeleteChapter: () => void chapterCrud.deleteChapter(),
       onSaveAndTriggerAutoUpdates: () => void saveAndTriggerAutoUpdates(),
       onSaveChapter: () => void saveChapter(),
       onReopenDrafting: () => setForm((prev: ChapterForm | null) => (prev ? { ...prev, status: "drafting" } : prev)),
+      onLocateContinuityRevision: locateContinuityRevision,
+      onReturnToContinuityReview: returnToContinuityReview,
+      onDismissContinuityRevision: clearContinuityRevision,
+      onActivateContinuityRevisionQueueItem: activateContinuityRevisionQueueItem,
+      onRemoveContinuityRevisionQueueItem: removeContinuityRevisionQueueItem,
+      onActivatePreviousContinuityRevision: activatePreviousContinuityRevision,
+      onActivateNextContinuityRevision: activateNextContinuityRevision,
+      onCompleteContinuityRevisionAndAdvance: completeContinuityRevisionAndAdvance,
+      onReturnToContinuityAfterCompleteChange: setReturnToContinuityAfterComplete,
       generationIndicatorLabel:
         genForm.stream && genStreamProgress
           ? getWritingGenerateIndicatorLabel(genStreamProgress.message, genStreamProgress.progress)
@@ -446,6 +474,42 @@ export function useWritingPageState(): WritingPageState {
   };
 
   const overlaysProps: WritingPageOverlaysProps = {
+    studioToolsDrawerProps: {
+      open: studioToolsOpen,
+      batchProgressText,
+      hasActiveChapter,
+      hasChapters,
+      hasPlan,
+      activeChapterStatus: activeChapter?.status ?? null,
+      hasContent,
+      loadingChapter,
+      dirty,
+      generating,
+      saving,
+      autoUpdatesTriggering,
+      continuityRevisionActive,
+      continuityRevisionHasExcerpt: Boolean(activeContinuityRevision?.hasExcerpt),
+      continuityRevisionProgressStatus: activeContinuityRevisionProgressStatus,
+      onClose: () => setStudioToolsOpen(false),
+      onOpenChapterList: () => setChapterListOpen(true),
+      onCreateChapter: chapterCrud.openCreate,
+      onOpenBatch: batch.openModal,
+      onOpenHistory: history.openDrawer,
+      onOpenAiGenerate: () => setAiOpen(true),
+      onSaveChapter: () => void saveChapter(),
+      onOpenReview: () => {
+        if (!projectId) return;
+        navigate(buildProjectReviewPath(projectId));
+      },
+      onOpenPromptInspector: () => setPromptInspectorOpen(true),
+      onOpenContextPreview: () => setContextPreviewOpen(true),
+      onOpenMemoryUpdate: openMemoryUpdate,
+      onOpenForeshadow: () => setForeshadowOpen(true),
+      onOpenTables: () => setTablesOpen(true),
+      onOpenTaskCenter: openTaskCenter,
+      onLocateContinuityRevision: locateContinuityRevision,
+      onReturnToContinuityReview: returnToContinuityReview,
+    },
     createChapterDialogProps: {
       open: chapterCrud.createOpen,
       saving: chapterCrud.createSaving,
@@ -498,6 +562,7 @@ export function useWritingPageState(): WritingPageState {
       preset,
       projectId,
       activeChapter: Boolean(activeChapter),
+      appMode,
       dirty,
       saving: saving || loadingChapter,
       genForm,
@@ -541,6 +606,7 @@ export function useWritingPageState(): WritingPageState {
       onClose: () => setPromptInspectorOpen(false),
       preset,
       chapterId: activeChapter?.id ?? undefined,
+      chapterPlan: form?.plan ?? "",
       draftContentMd: form?.content_md ?? "",
       generating,
       genForm,
@@ -589,6 +655,7 @@ export function useWritingPageState(): WritingPageState {
   const streamFloatingProps: WritingStreamFloatingCardProps = {
     open: generating && genForm.stream && !aiOpen,
     requestId: genRequestId,
+    chapterLabel: activeChapter ? activeChapter.title || `第 ${activeChapter.number} 章` : undefined,
     message: genStreamProgress?.message,
     progress: genStreamProgress?.progress ?? 0,
     onExpand: () => setAiOpen(true),

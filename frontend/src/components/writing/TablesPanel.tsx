@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 
 import { ApiError, apiJson } from "../../services/apiClient";
 import { Drawer } from "../ui/Drawer";
+import { FeedbackCallout, FeedbackEmptyState } from "../ui/Feedback";
 import { useConfirm } from "../ui/confirm";
 import { useToast } from "../ui/toast";
 
@@ -34,8 +35,8 @@ type ProjectTableRow = {
 const DEFAULT_KV_SCHEMA: TableSchema = {
   version: 1,
   columns: [
-    { key: "key", type: "string", label: "Key", required: true },
-    { key: "value", type: "string", label: "Value", required: false },
+    { key: "key", type: "string", label: "条目键", required: true },
+    { key: "value", type: "string", label: "条目值", required: false },
   ],
 };
 
@@ -79,8 +80,9 @@ function toInputString(value: unknown): string {
 
 function requiredFieldError(col: TableColumn, value: unknown): string | null {
   if (!col.required) return null;
-  if (value === null || value === undefined) return `${col.key} 为必填字段`;
-  if (typeof value === "string" && !value.trim()) return `${col.key} 为必填字段`;
+  const fieldLabel = col.label || col.key;
+  if (value === null || value === undefined) return `${fieldLabel} 为必填项`;
+  if (typeof value === "string" && !value.trim()) return `${fieldLabel} 为必填项`;
   return null;
 }
 
@@ -105,7 +107,7 @@ function parseJsonMaybe(value: unknown): { ok: true; value: unknown } | { ok: fa
   try {
     return { ok: true, value: JSON.parse(raw) };
   } catch {
-    return { ok: false, message: "JSON 解析失败" };
+    return { ok: false, message: "这段结构化内容无法解析，请检查格式" };
   }
 }
 
@@ -169,7 +171,7 @@ function TablesPanelContent(props: TablesPanelContentProps) {
     } catch (e) {
       const msg =
         e instanceof ApiError
-          ? `${e.message} (${e.code})${e.requestId ? ` request_id:${e.requestId}` : ""}`
+          ? `${e.message} (${e.code})${e.requestId ? ` 定位编号:${e.requestId}` : ""}`
           : "加载失败";
       setTablesError(msg);
     } finally {
@@ -199,7 +201,7 @@ function TablesPanelContent(props: TablesPanelContentProps) {
     } catch (e) {
       const msg =
         e instanceof ApiError
-          ? `${e.message} (${e.code})${e.requestId ? ` request_id:${e.requestId}` : ""}`
+          ? `${e.message} (${e.code})${e.requestId ? ` 定位编号:${e.requestId}` : ""}`
           : "加载失败";
       setRowsError(msg);
     } finally {
@@ -365,7 +367,7 @@ function TablesPanelContent(props: TablesPanelContentProps) {
           else {
             const n = Number(rawValue);
             if (!Number.isFinite(n)) {
-              toast.toastError(`${c.key}: number 非法`);
+              toast.toastError(`${c.key}: 数字格式不正确`);
               return;
             }
             nextData[c.key] = n;
@@ -463,9 +465,9 @@ function TablesPanelContent(props: TablesPanelContentProps) {
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="font-content text-2xl text-ink" id={props.titleId}>
-            表格面板（Tables）
+            表格资料
           </div>
-          <div className="mt-1 text-xs text-subtext">用于维护写作过程中的结构化状态（project_tables）。</div>
+          <div className="mt-1 text-xs text-subtext">用于维护写作过程中的资料清单、状态变量、规则表和连续性字段。</div>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -485,13 +487,15 @@ function TablesPanelContent(props: TablesPanelContentProps) {
       </div>
 
       {!props.projectId ? (
-        <div className="mt-4 text-sm text-subtext">缺少 projectId，无法加载。</div>
+        <FeedbackCallout className="mt-4" tone="warning" title="当前无法加载表格面板">
+          缺少项目上下文，请从项目内进入后再维护表格资料。
+        </FeedbackCallout>
       ) : (
         <div className="mt-5 grid gap-4">
           <div className="panel p-4">
             <div className="flex flex-wrap items-end justify-between gap-3">
               <div className="grid gap-2">
-                <div className="text-sm text-ink">选择表格</div>
+                <div className="text-sm text-ink">选择资料表</div>
                 <select
                   className="select"
                   aria-label="tables_select"
@@ -501,24 +505,36 @@ function TablesPanelContent(props: TablesPanelContentProps) {
                   <option value="">（未选择）</option>
                   {tables.map((t) => (
                     <option key={t.id} value={t.id}>
-                      {t.name} ({t.table_key}){typeof t.row_count === "number" ? ` · rows:${t.row_count}` : ""}
+                      {t.name} ({t.table_key}){typeof t.row_count === "number" ? ` · 共 ${t.row_count} 行` : ""}
                     </option>
                   ))}
                 </select>
               </div>
 
               <div className="grid gap-1 text-xs text-subtext">
-                <div>schema_version: {selectedTable?.schema_version ?? "-"}</div>
-                <div>rows: {typeof selectedTable?.row_count === "number" ? selectedTable.row_count : "-"}</div>
+                <div>当前结构版: {selectedTable?.schema_version ?? "-"}</div>
+                <div>总行数: {typeof selectedTable?.row_count === "number" ? selectedTable.row_count : "-"}</div>
               </div>
             </div>
 
-            {tablesError ? <div className="mt-3 text-sm text-danger">{tablesError}</div> : null}
+            {tablesError ? (
+              <FeedbackCallout className="mt-3" tone="danger" title="表格列表加载失败">
+                {tablesError}
+              </FeedbackCallout>
+            ) : null}
             {tablesLoading ? <div className="mt-3 text-sm text-subtext">加载中...</div> : null}
+            {!tablesLoading && !tablesError && tables.length === 0 ? (
+              <FeedbackEmptyState
+                className="mt-3"
+                variant="compact"
+                title="还没有资料表"
+                description="可以先创建一张简单的键值表，用来维护角色状态、章节变量或连续性清单。"
+              />
+            ) : null}
           </div>
 
           <div className="panel p-4">
-            <div className="text-sm text-ink">新建表格（默认 Key/Value）</div>
+            <div className="text-sm text-ink">新建资料表（默认键值结构）</div>
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               <label className="grid gap-1 text-xs text-subtext">
                 <span>表名</span>
@@ -530,7 +546,7 @@ function TablesPanelContent(props: TablesPanelContentProps) {
                 />
               </label>
               <label className="grid gap-1 text-xs text-subtext">
-                <span>table_key（可选）</span>
+                <span>内部标识（可选）</span>
                 <input
                   className="input"
                   aria-label="create_table_key"
@@ -541,7 +557,7 @@ function TablesPanelContent(props: TablesPanelContentProps) {
             </div>
             <div className="mt-3 flex justify-end">
               <button className="btn btn-primary" disabled={creating} onClick={() => void createTable()} type="button">
-                {creating ? "创建中..." : "创建"}
+                {creating ? "创建中..." : "创建资料表"}
               </button>
             </div>
           </div>
@@ -550,12 +566,12 @@ function TablesPanelContent(props: TablesPanelContentProps) {
             <div className="panel p-4">
               <div className="flex flex-wrap items-end justify-between gap-3">
                 <div className="grid gap-1">
-                  <div className="text-sm text-ink">表信息</div>
+                  <div className="text-sm text-ink">资料表设置</div>
                   <div className="text-xs text-subtext">
-                    id: <span className="font-mono">{selectedTable.id}</span>
+                    资料表编号（排障用）: <span className="font-mono">{selectedTable.id}</span>
                   </div>
                   <div className="text-xs text-subtext">
-                    table_key: <span className="font-mono">{selectedTable.table_key}</span>
+                    内部标识: <span className="font-mono">{selectedTable.table_key}</span>
                   </div>
                 </div>
 
@@ -574,7 +590,7 @@ function TablesPanelContent(props: TablesPanelContentProps) {
                 </div>
               </div>
               <label className="mt-3 grid gap-1 text-xs text-subtext">
-                <span>表名</span>
+                <span>资料表名称</span>
                 <input
                   className="input"
                   aria-label="rename_table_name"
@@ -583,7 +599,7 @@ function TablesPanelContent(props: TablesPanelContentProps) {
                 />
               </label>
               <label className="mt-3 flex items-center justify-between gap-3 text-sm text-ink">
-                <span>章节定稿自动更新（table_ai_update）</span>
+                <span>章节定稿后自动更新这张表</span>
                 <input
                   className="checkbox"
                   type="checkbox"
@@ -593,7 +609,7 @@ function TablesPanelContent(props: TablesPanelContentProps) {
                 />
               </label>
               <div className="mt-1 text-[11px] text-subtext">
-                启用后：章节定稿（done）会按项目设置自动排队更新该表；关闭可减少任务数量。
+                启用后，章节定稿时会按项目设置自动排队更新这张表；关闭后能减少后台更新任务。
               </div>
             </div>
           ) : null}
@@ -601,7 +617,7 @@ function TablesPanelContent(props: TablesPanelContentProps) {
           {selectedTable ? (
             <div className="panel p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="text-sm text-ink">表内容</div>
+                <div className="text-sm text-ink">表内内容</div>
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     className="btn btn-secondary"
@@ -622,131 +638,141 @@ function TablesPanelContent(props: TablesPanelContentProps) {
                 </div>
               </div>
 
-              {rowsError ? <div className="mt-3 text-sm text-danger">{rowsError}</div> : null}
+              {rowsError ? (
+                <FeedbackCallout className="mt-3" tone="danger" title="表格内容加载失败">
+                  {rowsError}
+                </FeedbackCallout>
+              ) : null}
               {rowsLoading ? <div className="mt-3 text-sm text-subtext">加载中...</div> : null}
 
               {selectedColumns.length ? (
-                <div className="mt-4 overflow-auto">
-                  <table className="min-w-full border-separate border-spacing-0">
-                    <thead>
-                      <tr>
-                        {selectedColumns.map((c) => (
-                          <th
-                            key={c.key}
-                            className="sticky top-0 border-b border-border bg-canvas px-2 py-1 text-left text-xs font-medium text-subtext"
-                          >
-                            {c.label || c.key}
-                            {c.required ? <span className="ml-1 text-danger">*</span> : null}
-                            <span className="ml-1 font-mono text-[10px] text-subtext/70">({c.type})</span>
-                          </th>
-                        ))}
-                        <th className="sticky top-0 border-b border-border bg-canvas px-2 py-1 text-left text-xs font-medium text-subtext">
-                          操作
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {rows.length === 0 ? (
+                rows.length === 0 && !rowsLoading ? (
+                  <FeedbackEmptyState
+                    className="mt-4"
+                    title="这张表还没有内容"
+                    description="可以先新增一行作为起点，再逐步补齐你的结构化信息。"
+                    actions={
+                      <button className="btn btn-primary" onClick={() => void addRow()} type="button">
+                        新增首行
+                      </button>
+                    }
+                  />
+                ) : (
+                  <div className="mt-4 overflow-auto">
+                    <table className="min-w-full border-separate border-spacing-0">
+                      <thead>
                         <tr>
-                          <td className="px-2 py-2 text-sm text-subtext" colSpan={selectedColumns.length + 1}>
-                            暂无数据。可点击「新增行」快速添加。
-                          </td>
+                          {selectedColumns.map((c) => (
+                            <th
+                              key={c.key}
+                              className="sticky top-0 border-b border-border bg-canvas px-2 py-1 text-left text-xs font-medium text-subtext"
+                            >
+                              {c.label || c.key}
+                              {c.required ? <span className="ml-1 text-danger">*</span> : null}
+                              <span className="ml-1 font-mono text-[10px] text-subtext/70">({c.type})</span>
+                            </th>
+                          ))}
+                          <th className="sticky top-0 border-b border-border bg-canvas px-2 py-1 text-left text-xs font-medium text-subtext">
+                            操作
+                          </th>
                         </tr>
-                      ) : null}
-                      {rows.map((r) => {
-                        const draft = draftRows[r.id] ?? {};
-                        return (
-                          <tr key={r.id} className="border-b border-border">
-                            {selectedColumns.map((c) => {
-                              const type = c.type.trim().toLowerCase();
-                              const value = draft[c.key];
-                              if (type === "boolean") {
+                      </thead>
+                      <tbody>
+                        {rows.map((r) => {
+                          const draft = draftRows[r.id] ?? {};
+                          return (
+                            <tr key={r.id} className="border-b border-border">
+                              {selectedColumns.map((c) => {
+                                const type = c.type.trim().toLowerCase();
+                                const value = draft[c.key];
+                                if (type === "boolean") {
+                                  return (
+                                    <td key={c.key} className="border-b border-border px-2 py-2 align-top">
+                                      <input
+                                        className="checkbox"
+                                        aria-label={`cell_${r.id}_${c.key}`}
+                                        checked={Boolean(value)}
+                                        onChange={(e) =>
+                                          setDraftRows((prev) => ({
+                                            ...prev,
+                                            [r.id]: { ...(prev[r.id] ?? {}), [c.key]: e.currentTarget.checked },
+                                          }))
+                                        }
+                                        type="checkbox"
+                                      />
+                                    </td>
+                                  );
+                                }
+                                if (type === "md" || type === "json") {
+                                  return (
+                                    <td key={c.key} className="border-b border-border px-2 py-2 align-top">
+                                      <textarea
+                                        className="textarea-underline min-h-10 w-64 border-transparent py-1 text-sm hover:border-border hover:bg-surface/50 focus:bg-surface/50"
+                                        aria-label={`cell_${r.id}_${c.key}`}
+                                        value={toInputString(value)}
+                                        onChange={(e) =>
+                                          setDraftRows((prev) => ({
+                                            ...prev,
+                                            [r.id]: { ...(prev[r.id] ?? {}), [c.key]: e.currentTarget.value },
+                                          }))
+                                        }
+                                      />
+                                    </td>
+                                  );
+                                }
                                 return (
                                   <td key={c.key} className="border-b border-border px-2 py-2 align-top">
                                     <input
-                                      className="checkbox"
+                                      className="input-underline w-56 border-transparent py-1 text-sm hover:border-border hover:bg-surface/50 focus:bg-surface/50"
                                       aria-label={`cell_${r.id}_${c.key}`}
-                                      checked={Boolean(value)}
-                                      onChange={(e) =>
-                                        setDraftRows((prev) => ({
-                                          ...prev,
-                                          [r.id]: { ...(prev[r.id] ?? {}), [c.key]: e.currentTarget.checked },
-                                        }))
-                                      }
-                                      type="checkbox"
-                                    />
-                                  </td>
-                                );
-                              }
-                              if (type === "md" || type === "json") {
-                                return (
-                                  <td key={c.key} className="border-b border-border px-2 py-2 align-top">
-                                    <textarea
-                                      className="textarea-underline min-h-10 w-64 border-transparent py-1 text-sm hover:border-border hover:bg-surface/50 focus:bg-surface/50"
-                                      aria-label={`cell_${r.id}_${c.key}`}
+                                      inputMode={type === "number" ? "numeric" : undefined}
                                       value={toInputString(value)}
-                                      onChange={(e) =>
+                                      onChange={(e) => {
+                                        const nextRaw = e.currentTarget.value;
                                         setDraftRows((prev) => ({
                                           ...prev,
-                                          [r.id]: { ...(prev[r.id] ?? {}), [c.key]: e.currentTarget.value },
-                                        }))
-                                      }
+                                          [r.id]: {
+                                            ...(prev[r.id] ?? {}),
+                                            [c.key]: type === "number" ? nextRaw.replace(/[^\d.-]/g, "") : nextRaw,
+                                          },
+                                        }));
+                                      }}
                                     />
                                   </td>
                                 );
-                              }
-                              return (
-                                <td key={c.key} className="border-b border-border px-2 py-2 align-top">
-                                  <input
-                                    className="input-underline w-56 border-transparent py-1 text-sm hover:border-border hover:bg-surface/50 focus:bg-surface/50"
-                                    aria-label={`cell_${r.id}_${c.key}`}
-                                    inputMode={type === "number" ? "numeric" : undefined}
-                                    value={toInputString(value)}
-                                    onChange={(e) => {
-                                      const nextRaw = e.currentTarget.value;
-                                      setDraftRows((prev) => ({
-                                        ...prev,
-                                        [r.id]: {
-                                          ...(prev[r.id] ?? {}),
-                                          [c.key]: type === "number" ? nextRaw.replace(/[^\d.-]/g, "") : nextRaw,
-                                        },
-                                      }));
-                                    }}
-                                  />
-                                </td>
-                              );
-                            })}
-                            <td className="border-b border-border px-2 py-2 align-top">
-                              <div className="flex flex-wrap gap-2">
-                                <button
-                                  className="btn btn-secondary px-3 py-1 text-sm"
-                                  onClick={() => void saveRow(r.id)}
-                                  type="button"
-                                >
-                                  保存
-                                </button>
-                                <button
-                                  className="btn btn-secondary px-3 py-1 text-sm"
-                                  onClick={() => void deleteRow(r.id)}
-                                  type="button"
-                                >
-                                  删除
-                                </button>
-                              </div>
-                              <div className="mt-1 text-[10px] text-subtext">
-                                row_index: {r.row_index} · id: <span className="font-mono">{r.id.slice(0, 8)}</span>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                              })}
+                              <td className="border-b border-border px-2 py-2 align-top">
+                                <div className="flex flex-wrap gap-2">
+                                  <button
+                                    className="btn btn-secondary px-3 py-1 text-sm"
+                                    onClick={() => void saveRow(r.id)}
+                                    type="button"
+                                  >
+                                    保存
+                                  </button>
+                                  <button
+                                    className="btn btn-secondary px-3 py-1 text-sm"
+                                    onClick={() => void deleteRow(r.id)}
+                                    type="button"
+                                  >
+                                    删除
+                                  </button>
+                                </div>
+                                <div className="mt-1 text-[10px] text-subtext">
+                                  行序号: {r.row_index} · 行编号: <span className="font-mono">{r.id.slice(0, 8)}</span>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )
               ) : (
-                <div className="mt-3 text-sm text-subtext">
-                  未找到 schema.columns。可通过 API 更新 schema 后再编辑行数据。
-                </div>
+                <FeedbackCallout className="mt-3" tone="warning" title="当前这张表还没有可编辑栏位">
+                  当前没有可编辑栏位。请先补齐表结构，再回来维护这张表的内容。
+                </FeedbackCallout>
               )}
             </div>
           ) : null}

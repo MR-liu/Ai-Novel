@@ -11,6 +11,7 @@ import { useAutoSave } from "../../hooks/useAutoSave";
 import { usePersistentOutletIsActive } from "../../hooks/usePersistentOutlet";
 import { useSaveHotkey } from "../../hooks/useSaveHotkey";
 import { useWizardProgress } from "../../hooks/useWizardProgress";
+import { buildStudioAiPath } from "../../lib/projectRoutes";
 import { createRequestSeqGuard } from "../../lib/requestSeqGuard";
 import { ApiError, apiJson } from "../../services/apiClient";
 import { markWizardLlmTestOk } from "../../services/wizard";
@@ -38,9 +39,21 @@ import {
   type VectorRagForm,
   type VectorRerankDryRunResult,
 } from "./models";
-import { formatLlmTestApiError } from "./llmApiError";
+import { formatLlmModelListError, formatLlmTestApiError } from "./llmApiError";
 import type { PromptsVectorRagSectionProps } from "./PromptsVectorRagSection";
-import { buildClearTaskApiKeyConfirm, buildDeleteTaskModuleConfirm, PROMPTS_COPY } from "./promptsCopy";
+import {
+  buildPromptsActionError,
+  buildClearProfileApiKeyConfirm,
+  buildClearTaskApiKeyConfirm,
+  buildDeleteProfileConfirm,
+  buildDeleteTaskModuleConfirm,
+  buildMainConnectionSuccessToast,
+  buildTaskConnectionSuccessToast,
+  buildTaskProfileApiKeyClearedToast,
+  buildTaskProfileApiKeySavedToast,
+  formatPromptsPresetValidationMessage,
+  PROMPTS_COPY,
+} from "./promptsCopy";
 
 type TaskModuleView = {
   task_key: string;
@@ -229,10 +242,10 @@ export function usePromptsPageState(): PromptsPageState {
     } catch (e) {
       if (e instanceof ApiError) {
         setLoadError({ message: e.message, code: e.code, requestId: e.requestId });
-        toast.toastError(`${e.message} (${e.code})`, e.requestId);
+        toast.toastError(buildPromptsActionError("加载当前项目的生成与调用设置", e.message, e.code), e.requestId);
       } else {
-        setLoadError({ message: "请求失败", code: "UNKNOWN_ERROR" });
-        toast.toastError("请求失败 (UNKNOWN_ERROR)");
+        setLoadError({ message: "暂时没能取回当前项目的生成与调用设置，请稍后重试", code: "UNKNOWN_ERROR" });
+        toast.toastError("暂时没能取回当前项目的生成与调用设置，请稍后重试");
       }
     } finally {
       setLoading(false);
@@ -321,7 +334,7 @@ export function usePromptsPageState(): PromptsPageState {
           task_key: draft.task_key,
           label: item?.label ?? draft.task_key,
           group: item?.group ?? "custom",
-          description: item?.description ?? "任务级模型覆盖",
+          description: item?.description ?? "任务例外设置",
           llm_profile_id: draft.llm_profile_id,
           form: draft.form,
           dirty: draft.isNew || payloadDirty || bindingDirty,
@@ -370,7 +383,7 @@ export function usePromptsPageState(): PromptsPageState {
 
       const payload = buildPresetPayload(snapshot);
       if (!payload.ok) {
-        if (!silent) toast.toastError(payload.message);
+        if (!silent) toast.toastError(formatPromptsPresetValidationMessage(payload.message));
         return false;
       }
 
@@ -436,13 +449,13 @@ export function usePromptsPageState(): PromptsPageState {
         bumpWizardLocal();
         if (silent) scheduleWizardRefresh();
         else {
-          toast.toastSuccess("已保存");
+          toast.toastSuccess(PROMPTS_COPY.llm.mainSaveSuccess);
           await refreshWizard();
         }
         return true;
       } catch (e) {
         const err = e as ApiError;
-        toast.toastError(`${err.message} (${err.code})`, err.requestId);
+        toast.toastError(buildPromptsActionError("保存默认调用设置", err.message, err.code), err.requestId);
         return false;
       } finally {
         setSavingPreset(false);
@@ -521,22 +534,22 @@ export function usePromptsPageState(): PromptsPageState {
       const draft = taskDrafts[taskKey];
       if (!draft) return false;
       if (taskProfileBusy[taskKey]) {
-        if (!opts?.silent) toast.toastError("该任务正在更新 API Key，请稍后再试");
+        if (!opts?.silent) toast.toastError(PROMPTS_COPY.llm.taskBusyUpdatingKey);
         return false;
       }
       const payload = buildPresetPayload(draft.form);
       if (!payload.ok) {
-        if (!opts?.silent) toast.toastError(payload.message);
+        if (!opts?.silent) toast.toastError(formatPromptsPresetValidationMessage(payload.message));
         return false;
       }
       if (draft.llm_profile_id) {
         const boundProfile = profiles.find((item) => item.id === draft.llm_profile_id) ?? null;
         if (!boundProfile) {
-          if (!opts?.silent) toast.toastError("任务模块绑定的配置库不存在，请重新选择");
+          if (!opts?.silent) toast.toastError(PROMPTS_COPY.llm.taskBoundProfileMissing);
           return false;
         }
         if (boundProfile.provider !== payload.payload.provider) {
-          if (!opts?.silent) toast.toastError("任务模块 provider 必须与所选 API 配置库 provider 一致");
+          if (!opts?.silent) toast.toastError(PROMPTS_COPY.llm.taskProviderMismatch);
           return false;
         }
       }
@@ -568,11 +581,11 @@ export function usePromptsPageState(): PromptsPageState {
             },
           };
         });
-        if (!opts?.silent) toast.toastSuccess("任务模块已保存", res.request_id);
+        if (!opts?.silent) toast.toastSuccess(PROMPTS_COPY.llm.taskSaved, res.request_id);
         return true;
       } catch (e) {
         const err = e as ApiError;
-        if (!opts?.silent) toast.toastError(`${err.message} (${err.code})`, err.requestId);
+        if (!opts?.silent) toast.toastError(buildPromptsActionError("保存任务例外", err.message, err.code), err.requestId);
         return false;
       } finally {
         setTaskSaving((prev) => ({ ...prev, [taskKey]: false }));
@@ -618,7 +631,7 @@ export function usePromptsPageState(): PromptsPageState {
           delete next[taskKey];
           return next;
         });
-        toast.toastSuccess("已移除未保存模块");
+        toast.toastSuccess(PROMPTS_COPY.llm.unsavedTaskRemoved);
         return true;
       }
 
@@ -660,11 +673,11 @@ export function usePromptsPageState(): PromptsPageState {
           delete next[taskKey];
           return next;
         });
-        toast.toastSuccess("任务模块已删除");
+        toast.toastSuccess(PROMPTS_COPY.llm.taskDeleted);
         return true;
       } catch (e) {
         const err = e as ApiError;
-        toast.toastError(`${err.message} (${err.code})`, err.requestId);
+        toast.toastError(buildPromptsActionError("删除任务例外", err.message, err.code), err.requestId);
         return false;
       } finally {
         setTaskDeleting((prev) => ({ ...prev, [taskKey]: false }));
@@ -727,7 +740,7 @@ export function usePromptsPageState(): PromptsPageState {
           loading: false,
           options: [],
           warning: null,
-          error: `${err.message} (${err.code})`,
+          error: formatLlmModelListError(err),
           requestId: err.requestId ?? null,
         });
       }
@@ -786,10 +799,10 @@ export function usePromptsPageState(): PromptsPageState {
       ok = (await saveTaskModule(item.task_key, { silent: true })) && ok;
     }
     if (savedAny && !ok) {
-      toast.toastError("存在未保存模块，请先检查参数与配置绑定");
+      toast.toastError(PROMPTS_COPY.llm.saveAllFailed);
     }
     if (savedAny && ok) {
-      toast.toastSuccess("已保存全部模块");
+      toast.toastSuccess(PROMPTS_COPY.llm.saveAllSuccess);
       await refreshWizard();
     }
     return ok;
@@ -862,7 +875,7 @@ export function usePromptsPageState(): PromptsPageState {
     const rawTopK = vectorRerankTopKDraft.trim();
     const parsedTopK = Math.floor(Number(rawTopK || String(vectorForm.vector_rerank_top_k)));
     if (!Number.isFinite(parsedTopK) || parsedTopK < 1 || parsedTopK > 1000) {
-      toast.toastError("rerank top_k 必须为 1-1000 的整数");
+      toast.toastError(PROMPTS_COPY.vectorRag.topKInvalid);
       return false;
     }
 
@@ -872,7 +885,7 @@ export function usePromptsPageState(): PromptsPageState {
       parsedTimeoutSeconds !== null &&
       (!Number.isFinite(parsedTimeoutSeconds) || parsedTimeoutSeconds < 1 || parsedTimeoutSeconds > 120)
     ) {
-      toast.toastError("rerank timeout_seconds 必须为 1-120 的整数（或留空）");
+      toast.toastError(PROMPTS_COPY.vectorRag.timeoutInvalid);
       return false;
     }
 
@@ -882,7 +895,7 @@ export function usePromptsPageState(): PromptsPageState {
       parsedHybridAlpha !== null &&
       (!Number.isFinite(parsedHybridAlpha) || parsedHybridAlpha < 0 || parsedHybridAlpha > 1)
     ) {
-      toast.toastError("rerank hybrid_alpha 必须为 0-1 的数字（或留空）");
+      toast.toastError(PROMPTS_COPY.vectorRag.hybridAlphaInvalid);
       return false;
     }
 
@@ -944,11 +957,11 @@ export function usePromptsPageState(): PromptsPageState {
       setRerankApiKeyDraft("");
       setRerankApiKeyClearRequested(false);
 
-      toast.toastSuccess("已保存");
+      toast.toastSuccess(PROMPTS_COPY.vectorRag.saveSuccess);
       return true;
     } catch (e) {
       const err = e as ApiError;
-      toast.toastError(`${err.message} (${err.code})`, err.requestId);
+      toast.toastError(buildPromptsActionError("保存资料策略", err.message, err.code), err.requestId);
       return false;
     } finally {
       setSavingVector(false);
@@ -991,11 +1004,11 @@ export function usePromptsPageState(): PromptsPageState {
         },
       );
       setEmbeddingDryRun({ requestId: res.request_id, result: res.data.result });
-      toast.toastSuccess("Embedding 测试已完成", res.request_id);
+      toast.toastSuccess(PROMPTS_COPY.vectorRag.embeddingDryRunSuccess, res.request_id);
     } catch (e) {
       const err = e as ApiError;
       setEmbeddingDryRunError({ message: err.message, code: err.code, requestId: err.requestId });
-      toast.toastError(`${err.message} (${err.code})`, err.requestId);
+      toast.toastError(buildPromptsActionError("检查资料召回连接", err.message, err.code), err.requestId);
     } finally {
       setEmbeddingDryRunLoading(false);
     }
@@ -1033,11 +1046,11 @@ export function usePromptsPageState(): PromptsPageState {
         },
       );
       setRerankDryRun({ requestId: res.request_id, result: res.data.result });
-      toast.toastSuccess("Rerank 测试已完成", res.request_id);
+      toast.toastSuccess(PROMPTS_COPY.vectorRag.rerankDryRunSuccess, res.request_id);
     } catch (e) {
       const err = e as ApiError;
       setRerankDryRunError({ message: err.message, code: err.code, requestId: err.requestId });
-      toast.toastError(`${err.message} (${err.code})`, err.requestId);
+      toast.toastError(buildPromptsActionError("检查结果排序链路", err.message, err.code), err.requestId);
     } finally {
       setRerankDryRunLoading(false);
     }
@@ -1059,13 +1072,9 @@ export function usePromptsPageState(): PromptsPageState {
       if (profileId === selectedProfileId) return;
 
       if (dirty) {
-        const choice = await confirm.choose({
-          title: "当前有未保存修改，是否切换配置？",
-          description: "切换后会刷新表单；建议先保存。",
-          confirmText: "保存并切换",
-          secondaryText: "不保存切换",
-          cancelText: "取消",
-        });
+      const choice = await confirm.choose({
+        ...PROMPTS_COPY.confirm.switchProfileDirty,
+      });
         if (choice === "cancel") return;
         if (choice === "confirm") {
           const ok = await saveAllDirtyModules();
@@ -1081,10 +1090,10 @@ export function usePromptsPageState(): PromptsPageState {
         });
         await reloadAll();
         await refreshWizard();
-        toast.toastSuccess("已切换配置");
+        toast.toastSuccess(PROMPTS_COPY.llm.switchProfileSuccess);
       } catch (e) {
         const err = e as ApiError;
-        toast.toastError(`${err.message} (${err.code})`, err.requestId);
+        toast.toastError(buildPromptsActionError("切换默认连接档案", err.message, err.code), err.requestId);
       } finally {
         setProfileBusy(false);
       }
@@ -1097,12 +1106,12 @@ export function usePromptsPageState(): PromptsPageState {
     if (profileBusy) return;
     const name = profileName.trim();
     if (!name) {
-      toast.toastError("请先填写“新建配置名”");
+      toast.toastError(PROMPTS_COPY.llm.fillProfileName);
       return;
     }
     const payload = buildPresetPayload(llmForm);
     if (!payload.ok) {
-      toast.toastError(payload.message);
+      toast.toastError(formatPromptsPresetValidationMessage(payload.message));
       return;
     }
 
@@ -1135,10 +1144,10 @@ export function usePromptsPageState(): PromptsPageState {
       setApiKey("");
       await reloadAll();
       await refreshWizard();
-      toast.toastSuccess("已保存为新配置并应用到项目");
+      toast.toastSuccess(PROMPTS_COPY.llm.createProfileSuccess);
     } catch (e) {
       const err = e as ApiError;
-      toast.toastError(`${err.message} (${err.code})`, err.requestId);
+      toast.toastError(buildPromptsActionError("新建连接档案", err.message, err.code), err.requestId);
     } finally {
       setProfileBusy(false);
     }
@@ -1148,7 +1157,7 @@ export function usePromptsPageState(): PromptsPageState {
     if (!projectId) return;
     if (profileBusy) return;
     if (!selectedProfileId) {
-      toast.toastError("请先选择一个后端配置");
+      toast.toastError(PROMPTS_COPY.llm.selectProfile);
       return;
     }
     if (dirty) {
@@ -1157,7 +1166,7 @@ export function usePromptsPageState(): PromptsPageState {
     }
     const payload = buildPresetPayload(llmForm);
     if (!payload.ok) {
-      toast.toastError(payload.message);
+      toast.toastError(formatPromptsPresetValidationMessage(payload.message));
       return;
     }
     const name = profileName.trim();
@@ -1182,10 +1191,10 @@ export function usePromptsPageState(): PromptsPageState {
         }),
       });
       await reloadAll();
-      toast.toastSuccess("已更新配置");
+      toast.toastSuccess(PROMPTS_COPY.llm.updateProfileSuccess);
     } catch (e) {
       const err = e as ApiError;
-      toast.toastError(`${err.message} (${err.code})`, err.requestId);
+      toast.toastError(buildPromptsActionError("更新连接档案", err.message, err.code), err.requestId);
     } finally {
       setProfileBusy(false);
     }
@@ -1193,13 +1202,13 @@ export function usePromptsPageState(): PromptsPageState {
 
   const deleteProfile = useCallback(async () => {
     if (!selectedProfileId) {
-      toast.toastError("请先选择一个后端配置");
+      toast.toastError(PROMPTS_COPY.llm.selectProfile);
       return;
     }
     if (profileBusy) return;
 
     const ok = await confirm.confirm({
-      ...PROMPTS_COPY.confirm.deleteProfile,
+      ...buildDeleteProfileConfirm(selectedProfile?.name),
       danger: true,
     });
     if (!ok) return;
@@ -1210,23 +1219,23 @@ export function usePromptsPageState(): PromptsPageState {
       setApiKey("");
       await reloadAll();
       await refreshWizard();
-      toast.toastSuccess("已删除配置");
+      toast.toastSuccess(PROMPTS_COPY.llm.deleteProfileSuccess);
     } catch (e) {
       const err = e as ApiError;
-      toast.toastError(`${err.message} (${err.code})`, err.requestId);
+      toast.toastError(buildPromptsActionError("删除连接档案", err.message, err.code), err.requestId);
     } finally {
       setProfileBusy(false);
     }
-  }, [confirm, profileBusy, reloadAll, refreshWizard, selectedProfileId, toast]);
+  }, [confirm, profileBusy, reloadAll, refreshWizard, selectedProfile?.name, selectedProfileId, toast]);
 
   const saveApiKeyToProfile = useCallback(async (): Promise<boolean> => {
     if (!selectedProfileId) {
-      toast.toastError("请先选择或新建一个后端配置");
+      toast.toastError(PROMPTS_COPY.llm.selectOrCreateProfile);
       return false;
     }
     const key = apiKey.trim();
     if (!key) {
-      toast.toastError("请先填写 API Key");
+      toast.toastError(PROMPTS_COPY.llm.fillApiKey);
       return false;
     }
     if (profileBusy) return false;
@@ -1241,11 +1250,11 @@ export function usePromptsPageState(): PromptsPageState {
       await reloadAll();
       await refreshWizard();
       bumpWizardLocal();
-      toast.toastSuccess("已保存 Key");
+      toast.toastSuccess(PROMPTS_COPY.llm.saveProfileApiKeySuccess);
       return true;
     } catch (e) {
       const err = e as ApiError;
-      toast.toastError(`${err.message} (${err.code})`, err.requestId);
+      toast.toastError(buildPromptsActionError("保存连接档案的访问密钥", err.message, err.code), err.requestId);
       return false;
     } finally {
       setProfileBusy(false);
@@ -1254,13 +1263,13 @@ export function usePromptsPageState(): PromptsPageState {
 
   const clearApiKeyInProfile = useCallback(async () => {
     if (!selectedProfileId) {
-      toast.toastError("请先选择一个后端配置");
+      toast.toastError(PROMPTS_COPY.llm.selectProfile);
       return;
     }
     if (profileBusy) return;
 
     const ok = await confirm.confirm({
-      ...PROMPTS_COPY.confirm.clearProfileApiKey,
+      ...buildClearProfileApiKeyConfirm(selectedProfile?.name),
       danger: true,
     });
     if (!ok) return;
@@ -1275,14 +1284,14 @@ export function usePromptsPageState(): PromptsPageState {
       await reloadAll();
       await refreshWizard();
       bumpWizardLocal();
-      toast.toastSuccess("已清除 Key");
+      toast.toastSuccess(PROMPTS_COPY.llm.clearProfileApiKeySuccess);
     } catch (e) {
       const err = e as ApiError;
-      toast.toastError(`${err.message} (${err.code})`, err.requestId);
+      toast.toastError(buildPromptsActionError("清除连接档案的访问密钥", err.message, err.code), err.requestId);
     } finally {
       setProfileBusy(false);
     }
-  }, [bumpWizardLocal, confirm, profileBusy, refreshWizard, reloadAll, selectedProfileId, toast]);
+  }, [bumpWizardLocal, confirm, profileBusy, refreshWizard, reloadAll, selectedProfile?.name, selectedProfileId, toast]);
 
   const saveTaskApiKey = useCallback(
     async (taskKey: string): Promise<boolean> => {
@@ -1290,18 +1299,18 @@ export function usePromptsPageState(): PromptsPageState {
       if (!draft) return false;
       const profileId = (draft.llm_profile_id ?? selectedProfileId ?? "").trim();
       if (!profileId) {
-        toast.toastError("请先为该任务绑定配置库，或先设置主配置");
+        toast.toastError(PROMPTS_COPY.llm.bindTaskProfileFirst);
         return false;
       }
       const profile = profiles.find((item) => item.id === profileId) ?? null;
       if (!profile) {
-        toast.toastError("生效配置库不存在，请刷新后重试");
+        toast.toastError(PROMPTS_COPY.llm.effectiveProfileMissing);
         return false;
       }
 
       const key = (taskApiKeyDrafts[taskKey] ?? "").trim();
       if (!key) {
-        toast.toastError("请先填写 API Key");
+        toast.toastError(PROMPTS_COPY.llm.fillApiKey);
         return false;
       }
       if (taskProfileBusy[taskKey]) return false;
@@ -1316,11 +1325,11 @@ export function usePromptsPageState(): PromptsPageState {
         setTaskApiKeyDrafts((prev) => ({ ...prev, [taskKey]: "" }));
         await refreshWizard();
         bumpWizardLocal();
-        toast.toastSuccess(`配置库「${profile.name}」Key 已保存`, res.request_id);
+        toast.toastSuccess(buildTaskProfileApiKeySavedToast(profile.name), res.request_id);
         return true;
       } catch (e) {
         const err = e as ApiError;
-        toast.toastError(`${err.message} (${err.code})`, err.requestId);
+        toast.toastError(buildPromptsActionError("保存任务所用连接档案的访问密钥", err.message, err.code), err.requestId);
         return false;
       } finally {
         setTaskProfileBusy((prev) => ({ ...prev, [taskKey]: false }));
@@ -1345,12 +1354,12 @@ export function usePromptsPageState(): PromptsPageState {
       if (!draft) return false;
       const profileId = (draft.llm_profile_id ?? selectedProfileId ?? "").trim();
       if (!profileId) {
-        toast.toastError("请先为该任务绑定配置库，或先设置主配置");
+        toast.toastError(PROMPTS_COPY.llm.bindTaskProfileFirst);
         return false;
       }
       const profile = profiles.find((item) => item.id === profileId) ?? null;
       if (!profile) {
-        toast.toastError("生效配置库不存在，请刷新后重试");
+        toast.toastError(PROMPTS_COPY.llm.effectiveProfileMissing);
         return false;
       }
       if (!profile?.has_api_key) return true;
@@ -1373,11 +1382,11 @@ export function usePromptsPageState(): PromptsPageState {
         setTaskApiKeyDrafts((prev) => ({ ...prev, [taskKey]: "" }));
         await refreshWizard();
         bumpWizardLocal();
-        toast.toastSuccess(`模块「${taskLabel}」绑定配置的 Key 已清除`, res.request_id);
+        toast.toastSuccess(buildTaskProfileApiKeyClearedToast(taskLabel), res.request_id);
         return true;
       } catch (e) {
         const err = e as ApiError;
-        toast.toastError(`${err.message} (${err.code})`, err.requestId);
+        toast.toastError(buildPromptsActionError("清除任务所用连接档案的访问密钥", err.message, err.code), err.requestId);
         return false;
       } finally {
         setTaskProfileBusy((prev) => ({ ...prev, [taskKey]: false }));
@@ -1405,14 +1414,14 @@ export function usePromptsPageState(): PromptsPageState {
 
       const payload = buildPresetPayload(draft.form);
       if (!payload.ok) {
-        toast.toastError(payload.message);
+        toast.toastError(formatPromptsPresetValidationMessage(payload.message));
         return false;
       }
 
       const boundProfileId = (draft.llm_profile_id ?? "").trim() || null;
       const boundProfile = boundProfileId ? (profiles.find((item) => item.id === boundProfileId) ?? null) : null;
       if (boundProfileId && !boundProfile) {
-        toast.toastError("任务模块绑定的配置库不存在，请重新选择");
+        toast.toastError(PROMPTS_COPY.llm.taskBoundProfileMissing);
         return false;
       }
       const taskAccessState = deriveLlmModuleAccessState({
@@ -1455,10 +1464,7 @@ export function usePromptsPageState(): PromptsPageState {
           }),
         });
         const preview = (res.data.text ?? "").trim();
-        toast.toastSuccess(
-          `模块「${taskLabel}」连接成功（延迟 ${res.data.latency_ms}ms${preview ? `，输出：${preview}` : ""}）`,
-          res.request_id,
-        );
+        toast.toastSuccess(buildTaskConnectionSuccessToast(taskLabel, res.data.latency_ms, preview), res.request_id);
         return true;
       } catch (e) {
         const err = e as ApiError;
@@ -1475,7 +1481,7 @@ export function usePromptsPageState(): PromptsPageState {
     if (!projectId) return false;
     const payload = buildPresetPayload(llmForm);
     if (!payload.ok) {
-      toast.toastError(payload.message);
+      toast.toastError(formatPromptsPresetValidationMessage(payload.message));
       return false;
     }
 
@@ -1514,10 +1520,7 @@ export function usePromptsPageState(): PromptsPageState {
         }),
       });
       const preview = (res.data.text ?? "").trim();
-      toast.toastSuccess(
-        `连接成功（延迟 ${res.data.latency_ms}ms${preview ? `，输出：${preview}` : ""}）`,
-        res.request_id,
-      );
+      toast.toastSuccess(buildMainConnectionSuccessToast(res.data.latency_ms, preview), res.request_id);
       if (projectId) {
         markWizardLlmTestOk(projectId, payload.payload.provider, model);
         bumpWizardLocal();
@@ -1646,7 +1649,7 @@ export function usePromptsPageState(): PromptsPageState {
     },
     goToPromptStudio: () => {
       if (!projectId) return;
-      navigate(`/projects/${projectId}/prompt-studio`);
+      navigate(buildStudioAiPath(projectId, "prompt-studio"));
     },
     wizardBarProps: {
       projectId,
@@ -1659,7 +1662,7 @@ export function usePromptsPageState(): PromptsPageState {
       primaryAction:
         wizard.progress.nextStep?.key === "llm"
           ? {
-              label: llmCtaBlockedReason ?? `测试连接并下一步：${nextAfterLlm ? nextAfterLlm.title : "继续"}`,
+              label: llmCtaBlockedReason ?? `检查连接并继续：${nextAfterLlm ? nextAfterLlm.title : "继续"}`,
               disabled: Boolean(savingPreset || testing || llmCtaBlockedReason),
               onClick: testAndGoNext,
             }

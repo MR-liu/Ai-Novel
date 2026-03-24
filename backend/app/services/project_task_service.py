@@ -15,6 +15,12 @@ from app.core.secrets import redact_api_keys
 from app.db.session import SessionLocal
 from app.db.utils import new_id, utc_now
 from app.models.project_task import ProjectTask
+from app.services.chapter_done_task_bundle import (
+    log_chapter_done_task_schedule_error,
+    new_chapter_done_task_result,
+    resolve_chapter_done_task_flags,
+    schedule_table_ai_update_bundle,
+)
 from app.services.project_task_event_service import (
     append_project_task_event,
     mark_project_task_enqueue_failed,
@@ -519,37 +525,22 @@ def schedule_chapter_done_tasks(
     cid = str(chapter_id or "").strip()
     reason_norm = str(reason or "").strip() or "chapter_done"
     token_norm = str(chapter_token or "").strip() or utc_now().isoformat().replace("+00:00", "Z")
-
-    out: dict[str, str | None] = {
-        "vector_rebuild": None,
-        "search_rebuild": None,
-        "worldbook_auto_update": None,
-        "characters_auto_update": None,
-        "plot_auto_update": None,
-        "table_ai_update": None,
-        "graph_auto_update": None,
-        "fractal_rebuild": None,
-    }
+    out = new_chapter_done_task_result()
 
     if not pid or not cid:
         return out
 
-    from app.models.project_settings import ProjectSettings
+    flags = resolve_chapter_done_task_flags(db=db, project_id=pid)
 
-    settings_row = db.get(ProjectSettings, pid)
-    auto_worldbook = bool(getattr(settings_row, "auto_update_worldbook_enabled", True)) if settings_row is not None else True
-    auto_characters = bool(getattr(settings_row, "auto_update_characters_enabled", True)) if settings_row is not None else True
-    auto_story_memory = bool(getattr(settings_row, "auto_update_story_memory_enabled", True)) if settings_row is not None else True
-    auto_graph = bool(getattr(settings_row, "auto_update_graph_enabled", True)) if settings_row is not None else True
-    auto_vector = bool(getattr(settings_row, "auto_update_vector_enabled", True)) if settings_row is not None else True
-    auto_search = bool(getattr(settings_row, "auto_update_search_enabled", True)) if settings_row is not None else True
-    auto_fractal = bool(getattr(settings_row, "auto_update_fractal_enabled", True)) if settings_row is not None else True
-    auto_tables = bool(getattr(settings_row, "auto_update_tables_enabled", True)) if settings_row is not None else True
+    def dedupe_task(task_id: str | None) -> None:
+        if not task_id or not isinstance(db, Session):
+            return
+        _try_dedupe_queued_chapter_tasks(db=db, project_id=pid, keep_task_id=task_id)
 
     try:
         from app.services.vector_rag_service import schedule_vector_rebuild_task
 
-        if auto_vector:
+        if flags.auto_vector:
             out["vector_rebuild"] = schedule_vector_rebuild_task(
                 db=db,
                 project_id=pid,
@@ -558,21 +549,12 @@ def schedule_chapter_done_tasks(
                 reason=reason_norm,
             )
     except Exception as exc:
-        log_event(
-            logger,
-            "warning",
-            event="CHAPTER_DONE_TASK_SCHEDULE_ERROR",
-            project_id=pid,
-            chapter_id=cid,
-            kind="vector_rebuild",
-            error_type=type(exc).__name__,
-            **exception_log_fields(exc),
-        )
+        log_chapter_done_task_schedule_error(logger=logger, project_id=pid, chapter_id=cid, kind="vector_rebuild", exc=exc)
 
     try:
         from app.services.search_index_service import schedule_search_rebuild_task
 
-        if auto_search:
+        if flags.auto_search:
             out["search_rebuild"] = schedule_search_rebuild_task(
                 db=db,
                 project_id=pid,
@@ -581,18 +563,9 @@ def schedule_chapter_done_tasks(
                 reason=reason_norm,
             )
     except Exception as exc:
-        log_event(
-            logger,
-            "warning",
-            event="CHAPTER_DONE_TASK_SCHEDULE_ERROR",
-            project_id=pid,
-            chapter_id=cid,
-            kind="search_rebuild",
-            error_type=type(exc).__name__,
-            **exception_log_fields(exc),
-        )
+        log_chapter_done_task_schedule_error(logger=logger, project_id=pid, chapter_id=cid, kind="search_rebuild", exc=exc)
 
-    if auto_worldbook:
+    if flags.auto_worldbook:
         try:
             out["worldbook_auto_update"] = schedule_worldbook_auto_update_task(
                 db=db,
@@ -603,21 +576,11 @@ def schedule_chapter_done_tasks(
                 chapter_token=token_norm,
                 reason=reason_norm,
             )
-            if isinstance(db, Session):
-                _try_dedupe_queued_chapter_tasks(db=db, project_id=pid, keep_task_id=out.get("worldbook_auto_update"))
+            dedupe_task(out.get("worldbook_auto_update"))
         except Exception as exc:
-            log_event(
-                logger,
-                "warning",
-                event="CHAPTER_DONE_TASK_SCHEDULE_ERROR",
-                project_id=pid,
-                chapter_id=cid,
-                kind="worldbook_auto_update",
-                error_type=type(exc).__name__,
-                **exception_log_fields(exc),
-            )
+            log_chapter_done_task_schedule_error(logger=logger, project_id=pid, chapter_id=cid, kind="worldbook_auto_update", exc=exc)
 
-    if auto_characters:
+    if flags.auto_characters:
         try:
             from app.services.characters_auto_update_service import schedule_characters_auto_update_task
 
@@ -630,21 +593,11 @@ def schedule_chapter_done_tasks(
                 chapter_token=token_norm,
                 reason=reason_norm,
             )
-            if isinstance(db, Session):
-                _try_dedupe_queued_chapter_tasks(db=db, project_id=pid, keep_task_id=out.get("characters_auto_update"))
+            dedupe_task(out.get("characters_auto_update"))
         except Exception as exc:
-            log_event(
-                logger,
-                "warning",
-                event="CHAPTER_DONE_TASK_SCHEDULE_ERROR",
-                project_id=pid,
-                chapter_id=cid,
-                kind="characters_auto_update",
-                error_type=type(exc).__name__,
-                **exception_log_fields(exc),
-            )
+            log_chapter_done_task_schedule_error(logger=logger, project_id=pid, chapter_id=cid, kind="characters_auto_update", exc=exc)
 
-    if auto_story_memory:
+    if flags.auto_story_memory:
         try:
             from app.services.plot_analysis_service import schedule_plot_auto_update_task
 
@@ -657,85 +610,29 @@ def schedule_chapter_done_tasks(
                 chapter_token=token_norm,
                 reason=reason_norm,
             )
-            if isinstance(db, Session):
-                _try_dedupe_queued_chapter_tasks(db=db, project_id=pid, keep_task_id=out.get("plot_auto_update"))
+            dedupe_task(out.get("plot_auto_update"))
         except Exception as exc:
-            log_event(
-                logger,
-                "warning",
-                event="CHAPTER_DONE_TASK_SCHEDULE_ERROR",
-                project_id=pid,
-                chapter_id=cid,
-                kind="plot_auto_update",
-                error_type=type(exc).__name__,
-                **exception_log_fields(exc),
-            )
+            log_chapter_done_task_schedule_error(logger=logger, project_id=pid, chapter_id=cid, kind="plot_auto_update", exc=exc)
 
-    if auto_tables:
+    if flags.auto_tables:
         try:
-            from app.models.project_table import ProjectTable
-            from app.services.table_ai_update_service import schedule_table_ai_update_task
-
-            table_rows = (
-                db.execute(
-                    select(ProjectTable.id, ProjectTable.schema_json, ProjectTable.auto_update_enabled)
-                    .where(ProjectTable.project_id == pid)
-                    .order_by(ProjectTable.updated_at.desc(), ProjectTable.id.desc())
-                    .limit(12)
-                )
-                .all()
-            )
-            if not isinstance(table_rows, list):
-                table_rows = []
-
-            created: list[str] = []
-            for table_id, schema_json, auto_update_enabled in table_rows:
-                if not bool(auto_update_enabled):
-                    continue
-                schema_obj = _compact_json_loads(schema_json)
-                if not isinstance(schema_obj, dict):
-                    continue
-                cols = schema_obj.get("columns") if isinstance(schema_obj.get("columns"), list) else []
-                has_number = any(
-                    isinstance(c, dict) and str(c.get("type") or "").strip().lower() == "number"
-                    for c in cols
-                )
-                if not has_number:
-                    continue
-
-                task_id = schedule_table_ai_update_task(
-                    db=db,
-                    project_id=pid,
-                    actor_user_id=actor_user_id,
-                    request_id=request_id,
-                    table_id=str(table_id),
-                    chapter_id=cid,
-                    chapter_token=token_norm,
-                    focus=None,
-                    reason=reason_norm,
-                )
-                if task_id:
-                    created.append(str(task_id))
-                    if isinstance(db, Session):
-                        _try_dedupe_queued_chapter_tasks(db=db, project_id=pid, keep_task_id=str(task_id))
-
-            out["table_ai_update"] = created[0] if created else None
-        except Exception as exc:
-            log_event(
-                logger,
-                "warning",
-                event="CHAPTER_DONE_TASK_SCHEDULE_ERROR",
+            out["table_ai_update"] = schedule_table_ai_update_bundle(
+                db=db,
                 project_id=pid,
+                actor_user_id=actor_user_id,
+                request_id=request_id,
                 chapter_id=cid,
-                kind="table_ai_update",
-                error_type=type(exc).__name__,
-                **exception_log_fields(exc),
+                chapter_token=token_norm,
+                reason=reason_norm,
+                dedupe_task_id=dedupe_task,
             )
+        except Exception as exc:
+            log_chapter_done_task_schedule_error(logger=logger, project_id=pid, chapter_id=cid, kind="table_ai_update", exc=exc)
 
     try:
         from app.services.graph_auto_update_service import schedule_graph_auto_update_task
 
-        if auto_graph:
+        if flags.auto_graph:
             out["graph_auto_update"] = schedule_graph_auto_update_task(
                 db=db,
                 project_id=pid,
@@ -746,22 +643,12 @@ def schedule_chapter_done_tasks(
                 focus=None,
                 reason=reason_norm,
             )
-            if isinstance(db, Session):
-                _try_dedupe_queued_chapter_tasks(db=db, project_id=pid, keep_task_id=out.get("graph_auto_update"))
+            dedupe_task(out.get("graph_auto_update"))
     except Exception as exc:
-        log_event(
-            logger,
-            "warning",
-            event="CHAPTER_DONE_TASK_SCHEDULE_ERROR",
-            project_id=pid,
-            chapter_id=cid,
-            kind="graph_auto_update",
-            error_type=type(exc).__name__,
-            **exception_log_fields(exc),
-        )
+        log_chapter_done_task_schedule_error(logger=logger, project_id=pid, chapter_id=cid, kind="graph_auto_update", exc=exc)
 
     try:
-        if auto_fractal:
+        if flags.auto_fractal:
             out["fractal_rebuild"] = schedule_fractal_rebuild_task(
                 db=db,
                 project_id=pid,
@@ -771,19 +658,9 @@ def schedule_chapter_done_tasks(
                 chapter_token=token_norm,
                 reason=reason_norm,
             )
-            if isinstance(db, Session):
-                _try_dedupe_queued_chapter_tasks(db=db, project_id=pid, keep_task_id=out.get("fractal_rebuild"))
+            dedupe_task(out.get("fractal_rebuild"))
     except Exception as exc:
-        log_event(
-            logger,
-            "warning",
-            event="CHAPTER_DONE_TASK_SCHEDULE_ERROR",
-            project_id=pid,
-            chapter_id=cid,
-            kind="fractal_rebuild",
-            error_type=type(exc).__name__,
-            **exception_log_fields(exc),
-        )
+        log_chapter_done_task_schedule_error(logger=logger, project_id=pid, chapter_id=cid, kind="fractal_rebuild", exc=exc)
 
     return out
 

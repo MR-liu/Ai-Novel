@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { useProjects } from "../../contexts/projects";
+import { buildProjectWritePath } from "../../lib/projectRoutes";
 import { UI_COPY } from "../../lib/uiCopy";
 
 export function ProjectSwitcher() {
@@ -104,7 +105,7 @@ export function ProjectSwitcher() {
                     aria-current={p.id === selected}
                     onClick={() => {
                       setOpen(false);
-                      navigate(`/projects/${p.id}/writing`);
+                      navigate(buildProjectWritePath(p.id));
                     }}
                   >
                     <span className={p.id === selected ? "text-ink" : "text-subtext"}>{p.name}</span>

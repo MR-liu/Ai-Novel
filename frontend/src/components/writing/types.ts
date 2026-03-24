@@ -16,6 +16,11 @@ export type PromptOverride = {
   messages?: PromptOverrideMessage[];
 };
 
+export type McpResearchForm = {
+  enabled: boolean;
+  tool_names: string[];
+};
+
 export type GenerateForm = {
   instruction: string;
   target_word_count: number | null;
@@ -29,6 +34,7 @@ export type GenerateForm = {
   style_id: string | null;
   memory_injection_enabled: boolean;
   memory_query_text: string;
+  mcp_research: McpResearchForm;
   memory_modules: {
     worldbook: boolean;
     story_memory: boolean;

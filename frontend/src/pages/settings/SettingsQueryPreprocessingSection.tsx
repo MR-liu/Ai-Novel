@@ -1,5 +1,6 @@
 import type { Dispatch, SetStateAction } from "react";
 
+import { FeedbackCallout, FeedbackDisclosure, FeedbackEmptyState } from "../../components/ui/Feedback";
 import { RequestIdBadge } from "../../components/ui/RequestIdBadge";
 import type { ProjectSettings } from "../../types";
 
@@ -26,22 +27,34 @@ type SettingsQueryPreprocessingSectionProps = {
 
 export function SettingsQueryPreprocessingSection(props: SettingsQueryPreprocessingSectionProps) {
   return (
-    <details
-      className="panel"
-      aria-label={SETTINGS_COPY.queryPreprocess.ariaLabel}
-      open={props.qpPanelOpen}
-      onToggle={(e) => props.onTogglePanel((e.currentTarget as HTMLDetailsElement).open)}
-    >
-      <summary className="ui-focus-ring ui-transition-fast cursor-pointer select-none p-6">
+    <section className="panel p-6" aria-label={SETTINGS_COPY.queryPreprocess.ariaLabel} role="region">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="grid gap-1">
           <div className="font-content text-xl text-ink">{SETTINGS_COPY.queryPreprocess.title}</div>
           <div className="text-xs text-subtext">{SETTINGS_COPY.queryPreprocess.subtitle}</div>
           <div className="text-xs text-subtext">{SETTINGS_COPY.queryPreprocess.featureHint}</div>
         </div>
-      </summary>
+        <span className="manuscript-chip">
+          {props.baselineSettings.query_preprocessing_effective?.enabled ? "当前生效中" : "当前未生效"}
+        </span>
+      </div>
 
-      <div className="px-6 pb-6 pt-0">
-        <div className="mt-4 grid gap-4">
+      <FeedbackDisclosure
+        className="mt-4 rounded-atelier border border-border bg-canvas p-4"
+        summaryClassName="px-0 py-0"
+        bodyClassName="pt-4"
+        open={props.qpPanelOpen}
+        onToggle={props.onTogglePanel}
+        title={
+          <div className="grid gap-1">
+            <div className="text-sm text-ink">展开检索前整理设置</div>
+            <div className="text-xs text-subtext">
+              这里负责在检索前先整理查询文本，适合处理噪声词、标签增强和排除规则，不负责改写正文内容。
+            </div>
+          </div>
+        }
+      >
+        <div className="grid gap-4">
           <label className="flex items-center gap-2 text-sm text-ink">
             <input
               className="checkbox"
@@ -76,7 +89,9 @@ export function SettingsQueryPreprocessingSection(props: SettingsQueryPreprocess
                   />
                   <div className="text-[11px] text-subtext">{SETTINGS_COPY.queryPreprocess.tagsHint}</div>
                   {props.queryPreprocessErr && props.queryPreprocessErrField === "tags" ? (
-                    <div className="text-xs text-warning">{props.queryPreprocessErr}</div>
+                    <FeedbackCallout className="text-xs" tone="warning" title="标签配置需要修正">
+                      {props.queryPreprocessErr}
+                    </FeedbackCallout>
                   ) : null}
                 </label>
 
@@ -97,7 +112,9 @@ export function SettingsQueryPreprocessingSection(props: SettingsQueryPreprocess
                   />
                   <div className="text-[11px] text-subtext">{SETTINGS_COPY.queryPreprocess.exclusionRulesHint}</div>
                   {props.queryPreprocessErr && props.queryPreprocessErrField === "exclusion_rules" ? (
-                    <div className="text-xs text-warning">{props.queryPreprocessErr}</div>
+                    <FeedbackCallout className="text-xs" tone="warning" title="排除规则需要修正">
+                      {props.queryPreprocessErr}
+                    </FeedbackCallout>
                   ) : null}
                 </label>
               </div>
@@ -122,7 +139,7 @@ export function SettingsQueryPreprocessingSection(props: SettingsQueryPreprocess
                 <div className="mt-1 text-xs text-subtext">{SETTINGS_COPY.queryPreprocess.previewHint}</div>
 
                 <label className="mt-3 grid gap-1 text-xs text-subtext">
-                  query_text
+                  原始查询文本（query_text）
                   <textarea
                     className="textarea mt-1 min-h-20 w-full"
                     value={props.qpPreviewQueryText}
@@ -152,36 +169,44 @@ export function SettingsQueryPreprocessingSection(props: SettingsQueryPreprocess
                   </button>
                 </div>
 
-                {props.qpPreviewError ? <div className="mt-3 text-xs text-warning">{props.qpPreviewError}</div> : null}
+                {props.qpPreviewError ? (
+                  <FeedbackCallout className="mt-3 text-xs" tone="warning" title="预处理预览没有完成">
+                    {props.qpPreviewError}
+                  </FeedbackCallout>
+                ) : null}
 
                 {props.qpPreview ? (
                   <div className="mt-3 grid gap-3">
                     <RequestIdBadge requestId={props.qpPreview.requestId} />
                     <div>
-                      <div className="text-xs text-subtext">normalized_query_text</div>
+                      <div className="text-xs text-subtext">整理后查询文本（normalized_query_text）</div>
                       <pre className="mt-1 max-h-40 overflow-auto rounded-atelier border border-border bg-surface p-3 text-xs text-ink">
                         {props.qpPreview.normalized}
                       </pre>
                     </div>
-                    <details>
-                      <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                        preprocess_obs
-                      </summary>
+                    <FeedbackDisclosure
+                      className="rounded-atelier border border-border bg-surface p-3"
+                      summaryClassName="px-0 py-0 text-xs text-subtext hover:text-ink"
+                      bodyClassName="pt-2"
+                      title="查看整理日志（preprocess_obs）"
+                    >
                       <pre className="mt-2 max-h-64 overflow-auto rounded-atelier border border-border bg-surface p-3 text-xs text-ink">
                         {JSON.stringify(props.qpPreview.obs ?? null, null, 2)}
                       </pre>
-                    </details>
+                    </FeedbackDisclosure>
                   </div>
                 ) : null}
               </div>
             </>
           ) : (
-            <div className="rounded-atelier border border-border bg-canvas p-4 text-xs text-subtext">
-              {SETTINGS_COPY.queryPreprocess.emptyState}
-            </div>
+            <FeedbackEmptyState
+              variant="compact"
+              title="当前未启用查询预处理"
+              description={SETTINGS_COPY.queryPreprocess.emptyState}
+            />
           )}
         </div>
-      </div>
-    </details>
+      </FeedbackDisclosure>
+    </section>
   );
 }

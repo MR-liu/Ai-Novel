@@ -43,6 +43,7 @@ describe("buildAnnotatedTextSegments", () => {
     expect(annotated).toHaveLength(3);
     expect(annotated[1]?.activeAnnotations ?? []).toHaveLength(0);
     expect(annotated[1]?.groupAnnotations ?? []).toHaveLength(2);
+    expect(annotated[1]?.isBridge).toBe(true);
   });
 
   it("keeps overlapping spans in one group and yields an overlap segment", () => {
@@ -59,5 +60,7 @@ describe("buildAnnotatedTextSegments", () => {
     expect(annotated[0]?.activeAnnotations.map((a) => a.id)).toEqual(["a1"]);
     expect(annotated[1]?.activeAnnotations.map((a) => a.id).sort()).toEqual(["a1", "a2"]);
     expect(annotated[1]?.primary.id).toBe("a2");
+    expect(annotated[1]?.isOverlap).toBe(true);
+    expect(annotated[1]?.overlapCount).toBe(2);
   });
 });

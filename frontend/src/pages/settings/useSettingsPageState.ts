@@ -10,6 +10,7 @@ import { usePersistentOutletIsActive } from "../../hooks/usePersistentOutlet";
 import { useProjectData } from "../../hooks/useProjectData";
 import { useSaveHotkey } from "../../hooks/useSaveHotkey";
 import { useWizardProgress } from "../../hooks/useWizardProgress";
+import { buildStoryBiblePath, buildStudioAiPath } from "../../lib/projectRoutes";
 import { UI_COPY } from "../../lib/uiCopy";
 import { ApiError, apiJson } from "../../services/apiClient";
 import { getCurrentUserId } from "../../services/currentUser";
@@ -836,7 +837,7 @@ export function useSettingsPageState(): SettingsPageState {
       const ok = await save();
       if (!ok) return;
     }
-    navigate(`/projects/${projectId}/characters`);
+    navigate(buildStoryBiblePath(projectId, "characters"));
   }, [dirty, navigate, projectId, save, saving]);
 
   const loading = settingsQuery.loading;
@@ -898,7 +899,7 @@ export function useSettingsPageState(): SettingsPageState {
           projectId,
           onOpenPromptsConfig: () => {
             if (!projectId) return;
-            navigate(`/projects/${projectId}/prompts#rag-config`);
+            navigate(`${buildStudioAiPath(projectId, "models")}#rag-config`);
           },
           baselineSettings,
           settingsForm,

@@ -124,6 +124,21 @@ issues/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*.csv
 /plan/
 /scripts/
 /test/
+!/scripts/
+!/scripts/__init__.py
+!/scripts/run_gate.py
+!/scripts/run_regression.py
+!/scripts/guards/
+!/scripts/guards/__init__.py
+!/scripts/guards/base.py
+!/scripts/guards/deployment_security_guard.py
+!/scripts/guards/prompt_preset_integrity_guard.py
+!/scripts/guards/registry.py
+!/scripts/guards/run.py
+!/test/
+!/test/specs/
+!/test/specs/api/
+!/test/specs/api/prompt-task-reachability.contract.spec.ts
 
 # -------------------------
 # OS / IDE

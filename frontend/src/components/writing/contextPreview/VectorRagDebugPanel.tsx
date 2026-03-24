@@ -1,6 +1,17 @@
 import { downloadJson, writeClipboardText } from "./utils";
-import { formatHybridCounts, formatOverfilter, formatRerankSummary } from "./vectorRag";
+import { FeedbackCallout, FeedbackDisclosure, FeedbackEmptyState } from "../../ui/Feedback";
+import {
+  formatRerankSummary,
+  formatVectorCandidateLabel,
+  formatVectorCountsSummary,
+  formatVectorHybridSummary,
+  formatVectorQueryStatusSummary,
+  formatVectorSourceSummary,
+  formatVectorTimingSummary,
+} from "./vectorRag";
 import { useVectorRagQuery } from "./useVectorRagQuery";
+import { formatVectorContentSourceLabel } from "../../../lib/vectorRagCopy";
+import { WritingDrawerSection } from "../WritingDrawerWorkbench";
 
 type ToastApi = {
   toastSuccess: (message: string, requestId?: string) => void;
@@ -16,6 +27,7 @@ export function VectorRagDebugPanel(props: {
   const {
     groupedVectorFinalChunks,
     runVectorQuery,
+    selectedVectorSources,
     setVectorQueryText,
     setVectorSources,
     vectorError,
@@ -29,25 +41,28 @@ export function VectorRagDebugPanel(props: {
     vectorSources,
   } = vector;
 
+  const statusSummary = vectorResult
+    ? formatVectorQueryStatusSummary(vectorResult)
+    : "还没开始检查本次资料召回。输入你此刻想写的情节或问题后，就能先预览系统会带回哪些参考片段。";
+  const sourceSummary = formatVectorSourceSummary(vectorResult?.filters.sources ?? selectedVectorSources);
+  const requestSummary = vectorRequestId ? `定位编号：${vectorRequestId}` : "尚未生成定位编号";
+  const countsSummary = vectorResult ? formatVectorCountsSummary(vectorResult) : null;
+  const timingSummary = vectorResult ? formatVectorTimingSummary(vectorResult.timings_ms) : null;
+  const hybridSummary = vectorResult ? formatVectorHybridSummary(vectorResult.hybrid, vectorResult.backend) : null;
+
   return (
-    <div className="panel p-4">
+    <WritingDrawerSection
+      kicker="资料召回"
+      title="先看这次会带回哪些参考片段"
+      copy="适合排查“为什么 AI 这次写偏了”或“为什么没引用到我想要的资料”。先看状态摘要，再逐层展开命中片段。"
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-sm text-ink">Vector RAG 调试</div>
-          <div className="mt-1 text-[11px] text-subtext">
-            {vectorResult ? (
-              vectorResult.enabled ? (
-                <span className="inline-flex rounded-atelier bg-success/10 px-2 py-0.5 text-success">enabled</span>
-              ) : (
-                <span className="inline-flex rounded-atelier bg-warning/10 px-2 py-0.5 text-warning">
-                  disabled: {vectorResult.disabled_reason ?? "unknown"}
-                  {vectorResult.error ? ` | error:${vectorResult.error}` : ""}
-                </span>
-              )
-            ) : (
-              "尚未查询"
-            )}
-            {vectorRequestId ? <span className="ml-2">request_id: {vectorRequestId}</span> : null}
+          <div className="text-sm text-ink">资料召回预览</div>
+          <div className="mt-1 text-[11px] leading-5 text-subtext">{statusSummary}</div>
+          <div className="drawer-workbench-chip-row mt-2">
+            <span className="manuscript-chip">{sourceSummary}</span>
+            <span className="manuscript-chip">{requestSummary}</span>
           </div>
         </div>
 
@@ -58,7 +73,7 @@ export function VectorRagDebugPanel(props: {
             onClick={() => void runVectorQuery()}
             type="button"
           >
-            {vectorLoading ? "查询中..." : "查询"}
+            {vectorLoading ? "检查中..." : "检查资料命中"}
           </button>
           <button
             className="btn btn-secondary"
@@ -68,7 +83,7 @@ export function VectorRagDebugPanel(props: {
               void (async () => {
                 try {
                   await writeClipboardText(JSON.stringify(vectorResult, null, 2));
-                  toast.toastSuccess("已复制 JSON");
+                  toast.toastSuccess("已复制底层结果");
                 } catch {
                   toast.toastError("复制失败");
                 }
@@ -76,7 +91,7 @@ export function VectorRagDebugPanel(props: {
             }}
             type="button"
           >
-            复制结果 JSON
+            复制底层结果
           </button>
           <button
             className="btn btn-secondary"
@@ -87,184 +102,155 @@ export function VectorRagDebugPanel(props: {
             }}
             type="button"
           >
-            导出 JSON
+            导出底层结果
           </button>
         </div>
       </div>
 
       <div className="mt-4 grid gap-3">
         <label className="text-xs text-subtext">
-          query_text
+          想核对的写作意图
           <textarea
             className="textarea mt-1 min-h-24 w-full"
             value={vectorQueryText}
-            placeholder="例如：本章要写的角色/地点/冲突（用于检索相关 chunk）"
+            placeholder="例如：本章要写的角色、地点、冲突或你担心会写偏的设定"
             onChange={(e) => setVectorQueryText(e.target.value)}
           />
         </label>
 
-        <div className="flex flex-wrap items-center gap-4 text-xs text-subtext">
-          <span>sources</span>
-          {(["worldbook", "outline", "chapter"] as const).map((src) => (
-            <label key={src} className="flex items-center gap-2 text-ink">
-              <input
-                className="checkbox"
-                checked={vectorSources[src]}
-                onChange={(e) => setVectorSources((prev) => ({ ...prev, [src]: e.target.checked }))}
-                type="checkbox"
-              />
-              {src}
-            </label>
-          ))}
+        <div className="drawer-workbench-subcard">
+          <div className="text-xs text-subtext">本次优先检查的资料</div>
+          <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-subtext">
+            {(["worldbook", "outline", "chapter"] as const).map((src) => (
+              <label key={src} className="flex items-center gap-2 text-ink">
+                <input
+                  className="checkbox"
+                  checked={vectorSources[src]}
+                  onChange={(e) => setVectorSources((prev) => ({ ...prev, [src]: e.target.checked }))}
+                  type="checkbox"
+                />
+                {formatVectorContentSourceLabel(src, src)}
+              </label>
+            ))}
+          </div>
         </div>
 
         {vectorError ? (
-          <div className="rounded-atelier border border-border bg-surface p-3 text-sm text-subtext">
-            <div className="text-ink">查询失败</div>
-            <div className="mt-1 text-xs text-subtext">
-              {vectorError.message} ({vectorError.code})
-              {vectorError.requestId ? <span className="ml-2">request_id: {vectorError.requestId}</span> : null}
-            </div>
-          </div>
+          <FeedbackCallout tone="danger" title="本次检查没有完成">
+            {vectorError.message} ({vectorError.code})
+            {vectorError.requestId ? <span className="ml-2">定位编号：{vectorError.requestId}</span> : null}
+          </FeedbackCallout>
         ) : null}
 
         {vectorResult ? (
           <>
-            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-subtext">
-              <span>
-                {vectorResult.counts ? (
-                  <>
-                    counts: total:{vectorResult.counts.candidates_total} | returned:
-                    {vectorResult.counts.candidates_returned} | unique_sources:{vectorResult.counts.unique_sources} |
-                    final_selected:{vectorResult.counts.final_selected} | dropped:{vectorResult.counts.dropped_total} |
-                    drop_by_reason:
-                    {Object.keys(vectorResult.counts.dropped_by_reason).length
-                      ? Object.entries(vectorResult.counts.dropped_by_reason)
-                          .map(([k, v]) => `${k}:${v}`)
-                          .join(" | ")
-                      : "-"}
-                  </>
-                ) : (
-                  <>
-                    counts: candidates:{vectorResult.candidates.length} | final_chunks:
-                    {vectorResult.final.chunks.length} | dropped:{vectorResult.dropped.length}
-                  </>
-                )}
-              </span>
-              <span>
-                timings_ms:{" "}
-                {Object.keys(vectorResult.timings_ms).length
-                  ? Object.entries(vectorResult.timings_ms)
-                      .map(([k, v]) => `${k}:${v}`)
-                      .join(" | ")
-                  : "-"}
-              </span>
+            <div className="drawer-workbench-subcard grid gap-2 text-xs text-subtext">
+              <div>{countsSummary}</div>
+              <div>{timingSummary}</div>
+              {vectorResult.rerank ? <div>重排摘要：{formatRerankSummary(vectorResult.rerank)}</div> : null}
+              <div>混合召回：{hybridSummary}</div>
             </div>
 
-            {vectorResult.rerank ? (
-              <div className="mt-1 text-xs text-subtext">rerank: {formatRerankSummary(vectorResult.rerank)}</div>
-            ) : null}
+            <FeedbackDisclosure
+              className="drawer-workbench-disclosure"
+              summaryClassName="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink"
+              title="注入到提示词的参考片段"
+            >
+              <pre className="drawer-workbench-codeblock mt-3">{vectorResult.prompt_block.text_md || "（空）"}</pre>
+            </FeedbackDisclosure>
 
-            <div className="mt-1 text-xs text-subtext">
-              hybrid:{" "}
-              {vectorResult.hybrid
-                ? `enabled:${String(vectorResult.hybrid.enabled)} | counts:${formatHybridCounts(vectorResult.hybrid.counts)} | overfilter:${formatOverfilter(vectorResult.hybrid.overfilter)}`
-                : "-"}{" "}
-              | backend: {vectorResult.backend ?? "-"}
-            </div>
-
-            <details className="mt-1">
-              <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                注入预览（prompt_block.text_md）
-              </summary>
-              <pre className="mt-2 max-h-64 overflow-auto rounded-atelier border border-border bg-surface p-3 text-xs text-ink">
-                {vectorResult.prompt_block.text_md || "（空）"}
-              </pre>
-            </details>
-
-            <details className="mt-1">
-              <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                query preprocess（raw vs normalized）
-              </summary>
-              <div className="mt-2 grid gap-3">
+            <FeedbackDisclosure
+              className="drawer-workbench-disclosure"
+              summaryClassName="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink"
+              title="检索语句整理过程"
+            >
+              <div className="mt-3 grid gap-3">
                 <div>
-                  <div className="text-[11px] text-subtext">raw_query_text</div>
-                  <pre className="mt-1 max-h-28 overflow-auto rounded-atelier border border-border bg-surface p-3 text-xs text-ink">
-                    {vectorRawQueryText ?? ""}
-                  </pre>
+                  <div className="text-[11px] text-subtext">最初输入</div>
+                  <pre className="drawer-workbench-codeblock mt-2">{vectorRawQueryText ?? ""}</pre>
                 </div>
                 <div>
-                  <div className="text-[11px] text-subtext">normalized_query_text</div>
-                  <pre className="mt-1 max-h-28 overflow-auto rounded-atelier border border-border bg-surface p-3 text-xs text-ink">
-                    {vectorNormalizedQueryText ?? ""}
-                  </pre>
+                  <div className="text-[11px] text-subtext">整理后的检索语句</div>
+                  <pre className="drawer-workbench-codeblock mt-2">{vectorNormalizedQueryText ?? ""}</pre>
                 </div>
                 <div>
-                  <div className="text-[11px] text-subtext">preprocess_obs</div>
-                  <pre className="mt-1 max-h-64 overflow-auto rounded-atelier border border-border bg-surface p-3 text-xs text-ink">
+                  <div className="text-[11px] text-subtext">整理底层记录</div>
+                  <pre className="drawer-workbench-codeblock mt-2">
                     {JSON.stringify(vectorPreprocessObs ?? null, null, 2)}
                   </pre>
                 </div>
               </div>
-            </details>
+            </FeedbackDisclosure>
 
-            <details className="mt-1">
-              <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                final.chunks（按 source/chapter 分组，{vectorResult.final.chunks.length}）
-              </summary>
-              <div className="mt-2 grid gap-2">
+            <FeedbackDisclosure
+              className="drawer-workbench-disclosure"
+              summaryClassName="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink"
+              title={`最终入选片段（按资料来源与章节整理，${vectorResult.final.chunks.length}）`}
+            >
+              <div className="mt-3 grid gap-2">
                 {vectorResult.final.chunks.length === 0 ? (
-                  <div className="text-[11px] text-subtext">（空）</div>
+                  <FeedbackEmptyState
+                    variant="compact"
+                    kicker="最终入选"
+                    title="当前没有入选片段"
+                    description="可以先检查查询语句、来源范围，或回头看候选片段为什么都被舍弃了。"
+                  />
                 ) : (
                   groupedVectorFinalChunks.map((src) => (
-                    <details key={src.source} className="rounded-atelier border border-border bg-surface p-2" open>
-                      <summary className="cursor-pointer select-none text-xs text-subtext hover:text-ink">
-                        source: {src.source}（{src.chapterGroups.reduce((acc, g) => acc + g.chunks.length, 0)}）
-                      </summary>
+                    <FeedbackDisclosure
+                      key={src.source}
+                      defaultOpen
+                      className="drawer-workbench-subcard"
+                      summaryClassName="cursor-pointer select-none text-xs text-subtext hover:text-ink"
+                      title={`资料来源：${formatVectorContentSourceLabel(src.source, src.source)}（${src.chapterGroups.reduce((acc, g) => acc + g.chunks.length, 0)}）`}
+                    >
                       <div className="mt-2 grid gap-2">
                         {src.chapterGroups.map((g) => (
-                          <details key={g.key} className="rounded-atelier border border-border bg-canvas p-2" open>
-                            <summary className="cursor-pointer select-none text-xs text-subtext hover:text-ink">
-                              {g.chapterNumber != null ? `chapter ${g.chapterNumber}` : "entry"}
-                              {g.title ? ` | ${g.title}` : ""}
-                              {g.sourceId ? ` | ${g.sourceId}` : ""}（{g.chunks.length}）
-                            </summary>
+                          <FeedbackDisclosure
+                            key={g.key}
+                            defaultOpen
+                            className="drawer-workbench-disclosure"
+                            summaryClassName="cursor-pointer select-none text-xs text-subtext hover:text-ink"
+                            title={`${g.chapterNumber != null ? `第 ${g.chapterNumber} 章` : "资料条目"}${g.title ? ` | ${g.title}` : ""}${g.sourceId ? ` | ${g.sourceId}` : ""}（${g.chunks.length}）`}
+                          >
                             <div className="mt-2 grid gap-2">
                               {g.chunks.map((c) => (
-                                <details key={c.id} className="rounded-atelier border border-border bg-surface p-2">
-                                  <summary className="cursor-pointer select-none text-xs text-subtext hover:text-ink">
-                                    chunk_index:{c.chunkIndex}
-                                    {c.distance != null ? ` | distance:${c.distance.toFixed(4)}` : ""}
-                                    {c.title ? ` | ${c.title}` : ""}
-                                  </summary>
-                                  <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded-atelier border border-border bg-canvas p-2 text-[11px] leading-4 text-subtext">
+                                <FeedbackDisclosure
+                                  key={c.id}
+                                  className="drawer-workbench-subcard"
+                                  summaryClassName="cursor-pointer select-none text-xs text-subtext hover:text-ink"
+                                  title={`${formatVectorCandidateLabel(c.source, c.chunkIndex, c.title, c.sourceId)}${c.distance != null ? ` | 匹配距离:${c.distance.toFixed(4)}` : ""}`}
+                                >
+                                  <pre className="drawer-workbench-codeblock mt-2 whitespace-pre-wrap text-[11px] leading-5 text-subtext">
                                     {(c.text || "").trim() || "（空）"}
                                   </pre>
-                                  <details className="mt-2">
-                                    <summary className="cursor-pointer select-none text-[11px] text-subtext hover:text-ink">
-                                      metadata
-                                    </summary>
-                                    <pre className="mt-2 max-h-64 overflow-auto rounded-atelier border border-border bg-canvas p-2 text-[11px] leading-4 text-subtext">
+                                  <FeedbackDisclosure
+                                    className="drawer-workbench-disclosure mt-2"
+                                    summaryClassName="cursor-pointer select-none text-[11px] text-subtext hover:text-ink"
+                                    title="底层元数据"
+                                  >
+                                    <pre className="drawer-workbench-codeblock mt-2 text-[11px] leading-5 text-subtext">
                                       {JSON.stringify(c.metadata, null, 2)}
                                     </pre>
-                                  </details>
-                                </details>
+                                  </FeedbackDisclosure>
+                                </FeedbackDisclosure>
                               ))}
                             </div>
-                          </details>
+                          </FeedbackDisclosure>
                         ))}
                       </div>
-                    </details>
+                    </FeedbackDisclosure>
                   ))
                 )}
               </div>
-            </details>
+            </FeedbackDisclosure>
 
-            <details className="mt-1">
-              <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                candidates（前 {Math.min(10, vectorResult.candidates.length)}）
-              </summary>
-              <div className="mt-2 grid gap-2">
+            <FeedbackDisclosure
+              className="drawer-workbench-disclosure"
+              summaryClassName="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink"
+              title={`候选片段（前 ${Math.min(10, vectorResult.candidates.length)} 条）`}
+            >
+              <div className="mt-3 grid gap-2">
                 {vectorResult.candidates.slice(0, 10).map((c) => {
                   const meta = c.metadata ?? {};
                   const source = typeof meta.source === "string" ? meta.source : "";
@@ -272,16 +258,18 @@ export function VectorRagDebugPanel(props: {
                   const sourceId = typeof meta.source_id === "string" ? meta.source_id : "";
                   const chunkIndexRaw = (meta as Record<string, unknown>).chunk_index;
                   const chunkIndex = typeof chunkIndexRaw === "number" ? chunkIndexRaw : Number(chunkIndexRaw);
-                  const chunkIndexText = Number.isFinite(chunkIndex) ? `| chunk_index:${chunkIndex}` : "";
                   const snippet = (c.text || "").replaceAll(/\s+/g, " ").trim().slice(0, 220);
                   return (
-                    <div key={c.id} className="rounded-atelier border border-border bg-surface p-2 text-xs">
+                    <div key={c.id} className="drawer-workbench-subcard text-xs">
                       <div className="truncate text-ink">
-                        {source || "chunk"} {chunkIndexText ? `${chunkIndexText} ` : ""}
-                        {title ? `| ${title} ` : ""}
-                        {sourceId ? `| ${sourceId}` : ""}
+                        {formatVectorCandidateLabel(
+                          source,
+                          Number.isFinite(chunkIndex) ? chunkIndex : null,
+                          title,
+                          sourceId,
+                        )}
                       </div>
-                      <div className="mt-1 text-subtext">distance: {c.distance.toFixed(4)}</div>
+                      <div className="mt-1 text-subtext">匹配距离：{c.distance.toFixed(4)}</div>
                       <div className="mt-1 text-subtext">
                         {snippet || "（空）"}
                         {snippet.length >= 220 ? "…" : ""}
@@ -290,23 +278,25 @@ export function VectorRagDebugPanel(props: {
                   );
                 })}
               </div>
-            </details>
+            </FeedbackDisclosure>
 
-            <details className="mt-1">
-              <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                raw vector query result
-              </summary>
-              <pre className="mt-2 max-h-64 overflow-auto rounded-atelier border border-border bg-surface p-3 text-xs text-ink">
-                {JSON.stringify(vectorResult, null, 2)}
-              </pre>
-            </details>
+            <FeedbackDisclosure
+              className="drawer-workbench-disclosure"
+              summaryClassName="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink"
+              title="底层返回结果（JSON）"
+            >
+              <pre className="drawer-workbench-codeblock mt-3">{JSON.stringify(vectorResult, null, 2)}</pre>
+            </FeedbackDisclosure>
           </>
         ) : (
-          <div className="text-sm text-subtext">
-            提示：当前环境缺 embedding/chroma 时会返回 disabled_reason，但结构仍可用于排查。
-          </div>
+          <FeedbackEmptyState
+            variant="compact"
+            kicker="资料召回"
+            title="还没开始检查资料命中"
+            description="如果当前环境暂时无法执行资料召回，这里会提示原因；你仍然可以先检查写作意图和资料范围是否合理。"
+          />
         )}
       </div>
-    </div>
+    </WritingDrawerSection>
   );
 }

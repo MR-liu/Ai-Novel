@@ -10,6 +10,7 @@ import { createChapterMarkerStreamParser } from "../../services/chapterMarkerStr
 import { getCurrentUserId } from "../../services/currentUser";
 import { SSEError, SSEPostClient } from "../../services/sseClient";
 import { writingMemoryInjectionEnabledStorageKey } from "../../services/uiState";
+import { buildMcpResearchPayload, DEFAULT_MCP_TOOL_NAMES } from "../../components/writing/mcpResearch";
 import type { Chapter, ChapterListItem, LLMPreset } from "../../types";
 import { extractMissingNumbers } from "./writingErrorUtils";
 import {
@@ -72,6 +73,10 @@ const DEFAULT_GEN_FORM: GenerateForm = {
   style_id: null,
   memory_injection_enabled: true,
   memory_query_text: "",
+  mcp_research: {
+    enabled: false,
+    tool_names: DEFAULT_MCP_TOOL_NAMES,
+  },
   memory_modules: {
     worldbook: true,
     story_memory: true,
@@ -271,6 +276,13 @@ export function useChapterGeneration(args: {
           typeof genForm.target_word_count === "number" && genForm.target_word_count >= 100
             ? genForm.target_word_count
             : null;
+        const mcpResearch = buildMcpResearchPayload({
+          enabled: genForm.mcp_research.enabled,
+          toolNames: genForm.mcp_research.tool_names,
+          instruction: genForm.instruction,
+          memoryQueryText: genForm.memory_query_text,
+          chapterPlan: form.plan ?? "",
+        });
 
         const payload = {
           mode,
@@ -285,6 +297,7 @@ export function useChapterGeneration(args: {
           style_id: genForm.style_id,
           memory_injection_enabled: genForm.memory_injection_enabled,
           memory_query_text: genForm.memory_query_text.trim() ? genForm.memory_query_text : null,
+          ...(mcpResearch ? { mcp_research: mcpResearch } : {}),
           memory_modules: genForm.memory_modules,
           context: {
             include_world_setting: genForm.context.include_world_setting,

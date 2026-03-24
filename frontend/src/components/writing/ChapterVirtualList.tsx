@@ -1,6 +1,7 @@
 import clsx from "clsx";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
+import { FeedbackEmptyState } from "../ui/Feedback";
 import { humanizeChapterStatus } from "../../lib/humanize";
 import type { ChapterListItem } from "../../types";
 
@@ -13,16 +14,7 @@ import {
 
 type ChapterVirtualListVariant = "panel" | "card";
 
-function renderTitle(variant: ChapterVirtualListVariant, chapter: ChapterListItem): ReactNode {
-  if (variant === "panel") {
-    return (
-      <div className="min-w-0 truncate">
-        <span className="mr-2 text-xs text-subtext">#{chapter.number}</span>
-        <span className="truncate">{chapter.title?.trim() ? chapter.title : "（未命名章节）"}</span>
-      </div>
-    );
-  }
-
+function renderTitle(chapter: ChapterListItem): ReactNode {
   return (
     <span className="min-w-0 truncate">
       {chapter.number}. {chapter.title?.trim() ? chapter.title : "（未命名）"}
@@ -33,14 +25,59 @@ function renderTitle(variant: ChapterVirtualListVariant, chapter: ChapterListIte
 function itemClassName(variant: ChapterVirtualListVariant, isActive: boolean): string {
   if (variant === "panel") {
     return clsx(
-      "ui-focus-ring ui-transition-fast flex h-11 w-full items-center justify-between gap-2 rounded-atelier px-3 text-left text-sm",
-      isActive ? "bg-canvas text-ink" : "text-subtext hover:bg-canvas hover:text-ink",
+      "chapter-directory-item ui-focus-ring ui-transition-fast w-full text-left",
+      isActive ? "is-active" : "",
     );
   }
 
   return clsx(
     "ui-focus-ring ui-transition-fast flex h-11 w-full items-center justify-between gap-2 rounded-atelier border px-3 text-left text-sm motion-safe:active:scale-[0.99]",
     isActive ? "border-accent/40 bg-accent/10 text-ink" : "border-border bg-canvas text-subtext hover:bg-surface",
+  );
+}
+
+function compactStatusLabel(status: ChapterListItem["status"]): string {
+  if (status === "planned") return "计划中";
+  if (status === "drafting") return "草稿";
+  if (status === "done") return "定稿";
+  return humanizeChapterStatus(status);
+}
+
+function formatUpdatedAtLabel(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return `${date.getMonth() + 1}/${date.getDate()}`;
+}
+
+function renderPanelContent(chapter: ChapterListItem, isActive: boolean): ReactNode {
+  const title = chapter.title?.trim() ? chapter.title : "（未命名章节）";
+  const readiness = [
+    { label: "要点", ready: chapter.has_plan },
+    { label: "正文", ready: chapter.has_content },
+    { label: "摘要", ready: chapter.has_summary },
+  ];
+
+  return (
+    <>
+      <div className="chapter-directory-head">
+        <div className="min-w-0">
+          <div className="chapter-directory-kicker">第 {chapter.number} 章</div>
+          <div className="chapter-directory-title">{title}</div>
+        </div>
+        <span className="chapter-directory-updated">{isActive ? "正在写" : formatUpdatedAtLabel(chapter.updated_at)}</span>
+      </div>
+
+      <div className="chapter-directory-meta">
+        <span className={clsx("chapter-directory-status", `is-${chapter.status}`)}>{compactStatusLabel(chapter.status)}</span>
+        <div className="chapter-directory-presence-row">
+          {readiness.map((item) => (
+            <span key={item.label} className={clsx("chapter-directory-presence", item.ready ? "is-ready" : "is-pending")}>
+              {item.label}
+            </span>
+          ))}
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -125,7 +162,15 @@ export function ChapterVirtualList(props: {
   if (chapters.length === 0) {
     return (
       <div className={clsx("flex h-full min-h-[160px] items-center justify-center", className)}>
-        {emptyState ?? <div className="p-3 text-sm text-subtext">暂无章节</div>}
+        {emptyState ?? (
+          <FeedbackEmptyState
+            variant="compact"
+            kicker="章节目录"
+            title="暂无章节"
+            description="先创建第一章，目录和后续校对视图就会开始成形。"
+            className="w-full"
+          />
+        )}
       </div>
     );
   }
@@ -157,15 +202,21 @@ export function ChapterVirtualList(props: {
                 onClick={() => onSelectChapter(chapter.id)}
                 type="button"
               >
-                {renderTitle(variant, chapter)}
-                <span
-                  className={clsx(
-                    "shrink-0 text-[11px]",
-                    variant === "card" && chapter.status === "done" ? "text-accent" : "text-subtext",
-                  )}
-                >
-                  {getStatusLabel(chapter)}
-                </span>
+                {variant === "panel" ? (
+                  renderPanelContent(chapter, isActive)
+                ) : (
+                  <>
+                    {renderTitle(chapter)}
+                    <span
+                      className={clsx(
+                        "shrink-0 text-[11px]",
+                        variant === "card" && chapter.status === "done" ? "text-accent" : "text-subtext",
+                      )}
+                    >
+                      {getStatusLabel(chapter)}
+                    </span>
+                  </>
+                )}
               </button>
             </div>
           );

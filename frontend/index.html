@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="paper-ink">
+<html lang="zh-CN" data-theme="focus-paper" data-theme-mode="light">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
@@ -9,13 +9,14 @@
       (() => {
         try {
           const userId = localStorage.getItem("ainovel::auth::user_id") || "local-user";
+          const appMode = localStorage.getItem(`ainovel::app_mode::${userId}`);
           const raw = localStorage.getItem(`ainovel::theme::${userId}`);
-          if (!raw) return;
-          const parsed = JSON.parse(raw);
-          const themeId = parsed?.themeId;
-          const mode = parsed?.mode;
+          const parsed = raw ? JSON.parse(raw) : null;
+          const mode = parsed?.mode === "dark" ? "dark" : "light";
+          const family = appMode === "studio" ? "studio-ledger" : "focus-paper";
           const root = document.documentElement;
-          if (themeId) root.dataset.theme = themeId;
+          root.dataset.theme = family;
+          root.dataset.themeMode = mode;
           if (mode === "dark") root.classList.add("dark");
           if (mode === "light") root.classList.remove("dark");
         } catch {

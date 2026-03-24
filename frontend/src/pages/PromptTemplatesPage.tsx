@@ -2,14 +2,18 @@ import clsx from "clsx";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
+import { ResearchWorkbenchPanel } from "../components/layout/ResearchWorkbenchPanel";
+import { FeedbackDisclosure } from "../components/ui/Feedback";
 import { useConfirm } from "../components/ui/confirm";
 import { useToast } from "../components/ui/toast";
 import { copyText } from "../lib/copyText";
 import { PROMPT_STUDIO_TASKS } from "../lib/promptTaskCatalog";
+import { buildProjectWritePath, buildStudioAiPath } from "../lib/projectRoutes";
 import { usePersistentOutletIsActive } from "../hooks/usePersistentOutlet";
 import { UnsavedChangesGuard } from "../hooks/useUnsavedChangesGuard";
 import { ApiError, apiJson, sanitizeFilename } from "../services/apiClient";
 import type { Character, Outline, Project, ProjectSettings, PromptBlock, PromptPreset, PromptPreview } from "../types";
+import { AI_WORKBENCH_COPY } from "./aiWorkbenchModels";
 import { PromptStudioPreviewPanel } from "./promptStudio/PromptStudioPreviewPanel";
 import type { PromptStudioTask } from "./promptStudio/types";
 import { guessPreviewValues } from "./promptStudio/utils";
@@ -20,6 +24,12 @@ const SUPPORTED_PREVIEW_TASK_KEYS = new Set(PREVIEW_TASKS.map((t) => t.key));
 const TEMPLATE_VAR_TOKEN_RE = /{{\s*([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)\s*}}/g;
 const TEMPLATE_MACRO_NAMES = new Set(["date", "time", "isodate"]);
 const SAFE_KEY_RE = /^[A-Za-z0-9_]+$/;
+const BLOCK_ROLE_LABELS: Record<string, string> = {
+  system: "总控说明",
+  user: "写作指令",
+  assistant: "参考口吻",
+  tool: "工具结果",
+};
 
 function extractTemplateVars(template: string): string[] {
   const out = new Set<string>();
@@ -113,18 +123,18 @@ function formatImportAllReport(report: ImportAllReport): string {
   const actions = Array.isArray(report.actions) ? report.actions : [];
 
   const lines = [
-    `dry_run: ${Boolean(report.dry_run)}`,
-    `created: ${Number(report.created) || 0}`,
-    `updated: ${Number(report.updated) || 0}`,
-    `skipped: ${Number(report.skipped) || 0}`,
-    `conflicts: ${conflicts.length}`,
+    `本次仅预演（dry_run）: ${Boolean(report.dry_run)}`,
+    `预计新建（created）: ${Number(report.created) || 0}`,
+    `预计更新（updated）: ${Number(report.updated) || 0}`,
+    `预计跳过（skipped）: ${Number(report.skipped) || 0}`,
+    `冲突项（conflicts）: ${conflicts.length}`,
     "",
-    "conflicts sample:",
-    ...(conflicts.slice(0, 10).map((c) => JSON.stringify(c)) || ["(none)"]),
+    "冲突示例 JSON（conflicts sample）:",
+    ...(conflicts.slice(0, 10).map((c) => JSON.stringify(c)) || ["(无)"]),
     "",
-    "actions sample:",
-    ...(actions.slice(0, 20).map((a) => JSON.stringify(a)) || ["(none)"]),
-    actions.length > 20 ? `...(${actions.length - 20} more actions)` : "",
+    "变更示例 JSON（actions sample）:",
+    ...(actions.slice(0, 20).map((a) => JSON.stringify(a)) || ["(无)"]),
+    actions.length > 20 ? `...（还有 ${actions.length - 20} 条动作）` : "",
   ].filter((v) => typeof v === "string");
 
   return lines.join("\n").trim();
@@ -158,6 +168,7 @@ export function PromptTemplatesPage() {
     () => blocks.some((b) => (draftTemplates[b.id] ?? "") !== (baselineTemplates[b.id] ?? "")),
     [baselineTemplates, blocks, draftTemplates],
   );
+  const promptStudioPath = projectId ? buildStudioAiPath(projectId, "prompt-studio") : "";
 
   const savingBlockIdRef = useRef<string | null>(null);
 
@@ -365,7 +376,7 @@ export function PromptTemplatesPage() {
       const res = await apiJson<{ export: unknown }>(`/api/projects/${projectId}/prompt_presets/export_all`);
       const stamp = new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
       downloadJsonFile(res.data.export, `prompt_presets_all_${stamp}.json`);
-      toast.toastSuccess("已导出整套");
+      toast.toastSuccess("已导出整套模板备份");
     } catch (e) {
       const err = e as ApiError;
       toast.toastError(`${err.message} (${err.code})`, err.requestId);
@@ -389,7 +400,7 @@ export function PromptTemplatesPage() {
 
         const report = dryRunRes.data;
         const ok = await confirm.confirm({
-          title: "导入整套 PromptPresets（dry_run）",
+          title: "导入整套模板备份前先预演（dry_run）",
           description: formatImportAllReport(report),
           confirmText: "应用导入",
           cancelText: "取消",
@@ -403,12 +414,12 @@ export function PromptTemplatesPage() {
         });
 
         toast.toastSuccess(
-          `已导入整套 created:${applyRes.data.created} updated:${applyRes.data.updated} skipped:${applyRes.data.skipped}`,
+          `整套模板已导入：新建 ${applyRes.data.created} | 更新 ${applyRes.data.updated} | 跳过 ${applyRes.data.skipped}`,
         );
         await loadResources();
       } catch (e) {
         if (e instanceof SyntaxError) {
-          toast.toastError("导入失败：不是合法 JSON");
+          toast.toastError("导入失败：文件不是合法 JSON");
           return;
         }
         const err = e as ApiError;
@@ -426,7 +437,7 @@ export function PromptTemplatesPage() {
     try {
       const res = await apiJson<{ export: unknown }>(`/api/prompt_presets/${preset.id}/export`);
       downloadJsonFile(res.data.export, `${preset.name || "prompt_preset"}.json`);
-      toast.toastSuccess("已导出");
+      toast.toastSuccess("已导出当前模板");
     } catch (e) {
       const err = e as ApiError;
       toast.toastError(`${err.message} (${err.code})`, err.requestId);
@@ -534,264 +545,392 @@ export function PromptTemplatesPage() {
     [confirm, toast],
   );
 
+  const dirtyBlockCount = useMemo(
+    () => blocks.reduce((count, block) => count + ((draftTemplates[block.id] ?? "") !== (baselineTemplates[block.id] ?? "") ? 1 : 0), 0),
+    [baselineTemplates, blocks, draftTemplates],
+  );
+  const taskLabelByKey = useMemo(() => new Map(PROMPT_STUDIO_TASKS.map((task) => [task.key, task.label])), []);
+  const selectedTemplateName = selectedResource?.name ?? "尚未选择模板";
+  const selectedTaskLabel = selectedResource?.activation_tasks?.length
+    ? selectedResource.activation_tasks.map((taskKey) => taskLabelByKey.get(taskKey) ?? taskKey).join(" / ")
+    : "尚未绑定任务";
+  const previewStatusLabel = preview ? "已有最近预览结果" : "还没有预览结果";
+  const nextStepText = !selectedResource
+    ? "先从左侧挑一个任务模板，再决定要改哪一段常用提示。"
+    : !selectedResource.preset_id
+      ? "这份模板还没在当前项目里初始化，先刷新资源或进入提示词工作室准备项目内版本。"
+      : pageDirty
+        ? "当前有未保存修改，建议先保存一处模板，再跑右侧预览确认语气和结构。"
+        : "先改最影响结果的一段模板，再跑预览；不要一口气同时改很多段。";
+
   return (
-    <div className="grid gap-6">
+    <div className="studio-shell">
       {pageDirty && outletActive ? <UnsavedChangesGuard when={pageDirty} /> : null}
-      <div className="panel p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+
+      <section className="panel p-4">
+        <div className="studio-cluster-header">
           <div>
+            <div className="studio-cluster-title">模板库</div>
+            <div className="studio-cluster-copy">
+              这里适合做轻量、稳定的模板微调。先从一套现成模板开始改，再决定是否需要进入更细粒度的提示词编排台。
+            </div>
+          </div>
+          <div className="studio-cluster-meta">
+            {loading || busy ? "处理中…" : pageDirty ? "有未保存修改" : "可安全试改"}
+          </div>
+        </div>
+
+        <div className="manuscript-status-list mt-4">
+          <span className="manuscript-chip max-w-[260px] truncate" title={selectedTemplateName}>
+            当前模板：{selectedTemplateName}
+          </span>
+          <span className="manuscript-chip">适用任务：{selectedTaskLabel}</span>
+          <span className="manuscript-chip">未保存片段：{dirtyBlockCount}</span>
+          <span className="manuscript-chip">{previewStatusLabel}</span>
+        </div>
+
+        <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+          <div className="rounded-atelier border border-border bg-canvas p-3">
             <div className="flex flex-wrap items-center gap-2">
-              <div className="text-lg font-semibold">Prompt 模板（新手）</div>
+              <div className="text-sm text-ink">什么时候优先用模板库</div>
               {pageDirty ? (
                 <span className="rounded-atelier border border-accent/30 bg-accent/10 px-2 py-0.5 text-xs text-accent">
                   未保存
                 </span>
               ) : null}
             </div>
-            <div className="text-xs text-subtext">
-              按任务提供系统默认模板；编辑会直接影响真实渲染。{" "}
-              <Link className="underline" to={`/projects/${projectId}/prompt-studio`}>
-                高级：提示词工作室
-              </Link>
+            <div className="mt-2 text-xs leading-6 text-subtext">
+              当你只是想改某个任务的默认开场、结构提示或常用约束，而不想面对完整 Prompt 片段系统时，从这里开始更轻松。
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button className="btn btn-secondary" onClick={() => void exportAllPresets()} disabled={busy} type="button">
+                导出整套模板备份
+              </button>
+              <label className={clsx("btn btn-secondary", busy ? "opacity-60" : "cursor-pointer")}>
+                导入整套模板备份
+                <input
+                  className="hidden"
+                  type="file"
+                  accept="application/json"
+                  disabled={busy}
+                  onChange={(e) => {
+                    const file = e.currentTarget.files?.[0];
+                    e.currentTarget.value = "";
+                    if (!file) return;
+                    void importAllPresets(file);
+                  }}
+                />
+              </label>
+            </div>
+            <div className="mt-2 text-[11px] text-subtext">整套文件更适合做项目级备份或跨项目迁移；导入前会先做一次预演，确认冲突和变更量。</div>
+          </div>
+
+          <div className="rounded-atelier border border-border bg-canvas p-3">
+            <div className="text-sm text-ink">如果此刻要换轨</div>
+            <div className="mt-2 text-xs leading-6 text-subtext">
+              如果你要控制更细的提示片段顺序、按任务注入或做真实预览，建议进入蓝图编排台；如果你发现问题其实出在项目级策略，就回到提示词方案页；如果只想看成品效果，就直接回写作页。
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {projectId ? (
+                <Link className="btn btn-secondary" to={buildStudioAiPath(projectId, "prompts")}>
+                  回提示词方案页
+                </Link>
+              ) : null}
+              {projectId ? (
+                <Link className="btn btn-secondary" to={promptStudioPath}>
+                  去蓝图编排台
+                </Link>
+              ) : null}
+              {projectId ? (
+                <Link className="btn btn-secondary" to={buildProjectWritePath(projectId)}>
+                  回写作页验证效果
+                </Link>
+              ) : null}
             </div>
           </div>
-          <div className="text-xs text-subtext">{loading || busy ? "处理中…" : ""}</div>
         </div>
 
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button className="btn btn-secondary" onClick={() => void exportAllPresets()} disabled={busy} type="button">
-            导出整套
-          </button>
-          <label className={clsx("btn btn-secondary", busy ? "opacity-60" : "cursor-pointer")}>
-            导入整套
-            <input
-              className="hidden"
-              type="file"
-              accept="application/json"
-              disabled={busy}
-              onChange={(e) => {
-                const file = e.currentTarget.files?.[0];
-                e.currentTarget.value = "";
-                if (!file) return;
-                void importAllPresets(file);
-              }}
-            />
-          </label>
+        <div className="mt-4 grid gap-3 lg:grid-cols-3">
+          <div className="surface p-3">
+            <div className="text-xs text-subtext">模板库</div>
+            <div className="mt-2 text-sm font-semibold text-ink">适合改稳定默认文案</div>
+            <div className="mt-1 text-xs leading-5 text-subtext">这页更适合处理“长期默认怎么写”，比如开场、结构、常用约束和固定口吻。</div>
+          </div>
+          <div className="surface p-3">
+            <div className="text-xs text-subtext">蓝图编排台</div>
+            <div className="mt-2 text-sm font-semibold text-ink">适合改片段顺序与注入条件</div>
+            <div className="mt-1 text-xs leading-5 text-subtext">如果你已经开始关心多任务复用、角色通道或片段顺序，就说明问题粒度已经超过模板库。</div>
+          </div>
+          <div className="surface p-3">
+            <div className="text-xs text-subtext">写作页</div>
+            <div className="mt-2 text-sm font-semibold text-ink">适合做最后的实战判断</div>
+            <div className="mt-1 text-xs leading-5 text-subtext">模板预览只是排除明显问题，真正是否好用，还是要回到章节起草里看输出是否顺手。</div>
+          </div>
         </div>
-      </div>
+      </section>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[280px,1fr]">
-        <div className="panel p-3">
-          <div className="text-sm font-semibold">系统默认模板</div>
-          <div className="mt-1 text-xs text-subtext">按分类分组；点击后在右侧编辑。</div>
-          <div className="mt-3 grid gap-3">
-            {resourceGroups.map(([category, items]) => (
-              <div key={category}>
-                <div className="text-xs text-subtext">{category}</div>
-                <div className="mt-1 grid gap-1">
-                  {items.map((r) => {
-                    const selected = r.key === selectedKey;
-                    return (
+      <section className="manuscript-status-band">
+        <div className="grid gap-1">
+          <div className="text-sm text-ink">{nextStepText}</div>
+          <div className="text-xs text-subtext">
+            模板库更适合做轻量、稳定的默认文案调整；如果你开始想控制片段顺序、任务注入或更细的蓝图关系，就该切到蓝图编排台。
+          </div>
+        </div>
+        <div className="manuscript-status-list">
+          <span className="manuscript-chip max-w-[260px] truncate" title={selectedTemplateName}>
+            当前模板：{selectedTemplateName}
+          </span>
+          <span className="manuscript-chip">适用任务：{selectedTaskLabel}</span>
+          <span className="manuscript-chip">未保存片段：{dirtyBlockCount}</span>
+          <span className="manuscript-chip">{previewStatusLabel}</span>
+        </div>
+      </section>
+
+      <ResearchWorkbenchPanel eyebrow="当前 AI 路径" {...AI_WORKBENCH_COPY.templates} />
+
+      <section className="studio-cluster">
+        <div className="studio-cluster-header">
+          <div>
+            <div className="studio-cluster-title">模板选择、改写与预览</div>
+            <div className="studio-cluster-copy">
+              建议顺序是“先挑模板，再改片段，最后跑预览”。这样更容易判断哪一处模板真正影响了生成结果。
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[280px,1fr]">
+          <div className="panel p-3">
+            <div className="text-sm font-semibold text-ink">模板目录</div>
+            <div className="mt-1 text-xs text-subtext">按写作任务和分类分组，点击后在右侧编辑当前模板内容。</div>
+            <div className="mt-3 grid gap-3">
+              {resourceGroups.map(([category, items]) => (
+                <div key={category}>
+                  <div className="text-xs text-subtext">{category}</div>
+                  <div className="mt-1 grid gap-1">
+                    {items.map((r) => {
+                      const selected = r.key === selectedKey;
+                      return (
+                        <button
+                          key={r.key}
+                          className={clsx(
+                            "ui-transition-fast w-full overflow-hidden rounded-atelier border px-3 py-2 text-left text-sm",
+                            selected
+                              ? "border-accent/40 bg-accent/10 text-ink"
+                              : "border-border bg-canvas text-subtext hover:bg-surface hover:text-ink",
+                          )}
+                          onClick={() => void selectKeyWithGuard(r.key)}
+                          type="button"
+                        >
+                          <div className="flex min-w-0 items-center justify-between gap-2">
+                            <div className="min-w-0 flex-1 truncate">{r.name}</div>
+                            <div className="min-w-0 max-w-[120px] shrink-0 truncate text-[11px] text-subtext">
+                              {r.activation_tasks?.[0] ? taskLabelByKey.get(r.activation_tasks[0]) ?? r.activation_tasks[0] : ""}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid gap-6">
+            <div className="panel p-4">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-semibold text-ink">{selectedTemplateName}</div>
+                  <div className="text-xs text-subtext">
+                    适用任务：{selectedTaskLabel}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => void exportSelectedPreset()}
+                    disabled={busy || !preset}
+                    type="button"
+                  >
+                    导出当前模板备份
+                  </button>
+                  <button
+                    className="btn btn-ghost text-accent hover:bg-accent/10"
+                    onClick={() => void resetSelectedPreset()}
+                    disabled={busy || !preset}
+                    type="button"
+                  >
+                    重置为系统默认
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+                <div className="rounded-atelier border border-border bg-canvas p-3">
+                  <div className="text-sm text-ink">当前编辑建议</div>
+                  <div className="mt-2 text-xs leading-6 text-subtext">
+                    优先改“开场定位、输出结构、关键约束”这三类模板文本，它们对最终生成稳定性影响最大；细碎措辞建议放到预览通过之后再抛光。
+                  </div>
+                </div>
+                <div className="rounded-atelier border border-border bg-canvas p-3">
+                  <div className="text-sm text-ink">什么时候该去提示词工作室</div>
+                  <div className="mt-2 text-xs leading-6 text-subtext">
+                    如果你已经不仅是在改默认文案，而是想控制片段顺序、启用条件、角色注入或多任务复用，那就该进入更细粒度的提示词工作室。
+                  </div>
+                </div>
+              </div>
+
+              {!selectedResource ? <div className="text-sm text-subtext">先从左侧挑一个模板。</div> : null}
+
+              {selectedResource && !selectedResource.preset_id ? (
+                <div className="text-sm text-subtext">该模板尚未在项目中初始化，请刷新或先打开提示词工作室。</div>
+              ) : null}
+
+              {preset ? (
+                <div className="grid gap-3">
+                  <FeedbackDisclosure
+                  className="rounded-atelier border border-border bg-surface/50 p-3"
+                  summaryClassName="px-0 py-0 text-sm hover:text-ink"
+                  bodyClassName="pt-2"
+                    title="模板语法与自动补全占位符"
+                  >
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-subtext">
+                      <div className="grid gap-1">
+                        <div>
+                          占位符（变量）：<span className="atelier-mono text-ink">{"{{project_name}}"}</span>{" "}
+                          <span className="atelier-mono text-ink">{"{{story.outline}}"}</span>
+                        </div>
+                        <div>
+                          条件判断：<span className="atelier-mono text-ink">{"{% if chapter_number == '1' %}"}</span>...{" "}
+                          <span className="atelier-mono text-ink">{"{% endif %}"}</span>
+                        </div>
+                        <div>
+                          快捷占位符（宏）：<span className="atelier-mono text-ink">{"{{date}}"}</span>{" "}
+                          <span className="atelier-mono text-ink">{"{{time}}"}</span>{" "}
+                          <span className="atelier-mono text-ink">{"{{pick::A::B}}"}</span>
+                        </div>
+                        <div>右侧预览只会读取“已保存模板”；如果预览没变化，通常是因为当前改动还没保存。</div>
+                      </div>
                       <button
-                        key={r.key}
-                        className={clsx(
-                          "ui-transition-fast w-full overflow-hidden rounded-atelier border px-3 py-2 text-left text-sm",
-                          selected
-                            ? "border-accent/40 bg-accent/10 text-ink"
-                            : "border-border bg-canvas text-subtext hover:bg-surface hover:text-ink",
-                        )}
-                        onClick={() => void selectKeyWithGuard(r.key)}
+                        className="btn btn-secondary btn-sm"
+                        onClick={async () => {
+                          await copyText(availableVariablesText, { title: "复制失败：请手动复制占位符清单" });
+                        }}
                         type="button"
                       >
-                        <div className="flex min-w-0 items-center justify-between gap-2">
-                          <div className="min-w-0 flex-1 truncate">{r.name}</div>
-                          <div className="min-w-0 max-w-[120px] shrink-0 truncate text-[11px] text-subtext">
-                            {r.activation_tasks?.[0] ?? ""}
-                          </div>
-                        </div>
+                        复制占位符清单
                       </button>
-                    );
-                  })}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="grid gap-6">
-          <div className="panel p-4">
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <div className="text-sm font-semibold">{selectedResource?.name ?? "（未选择）"}</div>
-                <div className="text-xs text-subtext">
-                  tasks:{" "}
-                  {selectedResource?.activation_tasks?.length ? selectedResource.activation_tasks.join(", ") : "—"}
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  className="btn btn-secondary"
-                  onClick={() => void exportSelectedPreset()}
-                  disabled={busy || !preset}
-                  type="button"
-                >
-                  导出当前
-                </button>
-                <button
-                  className="btn btn-ghost text-accent hover:bg-accent/10"
-                  onClick={() => void resetSelectedPreset()}
-                  disabled={busy || !preset}
-                  type="button"
-                >
-                  重置为系统默认
-                </button>
-              </div>
-            </div>
-
-            {!selectedResource ? <div className="text-sm text-subtext">请选择左侧模板。</div> : null}
-
-            {selectedResource && !selectedResource.preset_id ? (
-              <div className="text-sm text-subtext">该模板尚未在项目中初始化，请刷新或先打开提示词工作室。</div>
-            ) : null}
-
-            {preset ? (
-              <div className="grid gap-3">
-                <details className="rounded-atelier border border-border bg-surface/50 p-3">
-                  <summary className="ui-transition-fast cursor-pointer text-sm hover:text-ink">
-                    模板语法与可用变量（点击复制）
-                  </summary>
-                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-subtext">
-                    <div className="grid gap-1">
-                      <div>
-                        变量：<span className="atelier-mono text-ink">{"{{project_name}}"}</span>{" "}
-                        <span className="atelier-mono text-ink">{"{{story.outline}}"}</span>
-                      </div>
-                      <div>
-                        条件：<span className="atelier-mono text-ink">{"{% if chapter_number == '1' %}"}</span>...{" "}
-                        <span className="atelier-mono text-ink">{"{% endif %}"}</span>
-                      </div>
-                      <div>
-                        宏：<span className="atelier-mono text-ink">{"{{date}}"}</span>{" "}
-                        <span className="atelier-mono text-ink">{"{{time}}"}</span>{" "}
-                        <span className="atelier-mono text-ink">{"{{pick::A::B}}"}</span>
-                      </div>
-                      <div>预览渲染使用“已保存模板”；未保存改动请先点“保存”。</div>
                     </div>
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      onClick={async () => {
-                        await copyText(availableVariablesText, { title: "复制失败：请手动复制变量清单" });
-                      }}
-                      type="button"
-                    >
-                      复制变量清单
-                    </button>
-                  </div>
-                  <pre className="mt-2 max-h-[220px] overflow-auto whitespace-pre-wrap break-words rounded-atelier border border-border bg-surface p-3 text-xs">
-                    {availableVariablesText || "（变量清单为空）"}
-                  </pre>
-                </details>
+                    <pre className="mt-2 max-h-[220px] overflow-auto whitespace-pre-wrap break-words rounded-atelier border border-border bg-surface p-3 text-xs">
+                      {availableVariablesText || "（占位符清单为空）"}
+                    </pre>
+                  </FeedbackDisclosure>
 
-                {blocks.map((b) => {
-                  const draft = draftTemplates[b.id] ?? "";
-                  const baseline = baselineTemplates[b.id] ?? "";
-                  const dirty = draft !== baseline;
-                  const usedVars = extractTemplateVars(draft);
-                  return (
-                    <div key={b.id} className="rounded-atelier border border-border bg-canvas p-3">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-medium">
-                            {b.name} <span className="text-xs text-subtext">({b.role})</span>
-                          </div>
-                          <div className="truncate text-xs text-subtext">{b.identifier}</div>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          {dirty ? <div className="text-xs text-accent">未保存</div> : null}
-                          <button
-                            className="btn btn-primary"
-                            onClick={() => void saveBlockTemplate(b)}
-                            disabled={busy || !dirty}
-                            type="button"
-                          >
-                            保存
-                          </button>
-                          <button
-                            className="btn btn-ghost text-accent hover:bg-accent/10"
-                            onClick={() => void resetBlockTemplate(b)}
-                            disabled={busy}
-                            type="button"
-                          >
-                            重置
-                          </button>
-                        </div>
-                      </div>
-                      <div className="mt-2 grid gap-1">
+                  {blocks.map((b) => {
+                    const draft = draftTemplates[b.id] ?? "";
+                    const baseline = baselineTemplates[b.id] ?? "";
+                    const dirty = draft !== baseline;
+                    const usedVars = extractTemplateVars(draft);
+                    return (
+                      <div key={b.id} className="rounded-atelier border border-border bg-canvas p-3">
                         <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="text-xs text-subtext">
-                            变量（本块）：{usedVars.length ? `${usedVars.length} 个（点击复制）` : "未检测到"}
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-medium">
+                              {b.name}{" "}
+                              <span className="text-xs text-subtext">（{BLOCK_ROLE_LABELS[b.role] ?? b.role}）</span>
+                            </div>
+                            <div className="truncate text-xs text-subtext">片段标识（identifier）：{b.identifier}</div>
                           </div>
-                          {usedVars.length ? (
+                          <div className="flex flex-wrap items-center gap-2">
+                            {dirty ? <div className="text-xs text-accent">未保存</div> : null}
                             <button
-                              className="btn btn-secondary btn-sm"
-                              onClick={async () => {
-                                const text = usedVars.map((v) => `{{` + v + `}}`).join("\n");
-                                await copyText(text, {
-                                  title: "复制失败：请手动复制变量清单",
-                                });
-                              }}
+                              className="btn btn-primary"
+                              onClick={() => void saveBlockTemplate(b)}
+                              disabled={busy || !dirty}
                               type="button"
                             >
-                              复制本块变量
+                              保存
                             </button>
-                          ) : null}
+                            <button
+                              className="btn btn-ghost text-accent hover:bg-accent/10"
+                              onClick={() => void resetBlockTemplate(b)}
+                              disabled={busy}
+                              type="button"
+                            >
+                              重置
+                            </button>
+                          </div>
                         </div>
-                        {usedVars.length ? (
-                          <div className="flex flex-wrap gap-1">
-                            {usedVars.map((v) => (
+                        <div className="mt-2 text-[11px] leading-5 text-subtext">
+                          编辑建议：先把这一段当成“对 AI 的固定说明卡”。如果你改的是结构、约束或口吻，记得保存后立刻看右侧预览有没有按预期变化。
+                        </div>
+                        <div className="mt-2 grid gap-1">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="text-xs text-subtext">
+                              占位符（本块）：{usedVars.length ? `${usedVars.length} 个（点击复制）` : "未检测到"}
+                            </div>
+                            {usedVars.length ? (
                               <button
-                                key={v}
-                                className="btn btn-ghost btn-sm atelier-mono"
+                                className="btn btn-secondary btn-sm"
                                 onClick={async () => {
-                                  const text = `{{` + v + `}}`;
-                                  await copyText(text, { title: "复制失败：请手动复制变量" });
+                                  const text = usedVars.map((v) => `{{` + v + `}}`).join("\n");
+                                  await copyText(text, {
+                                    title: "复制失败：请手动复制本块占位符清单",
+                                  });
                                 }}
                                 type="button"
                               >
-                                {`{{` + v + `}}`}
+                                复制本块占位符
                               </button>
-                            ))}
+                            ) : null}
                           </div>
-                        ) : null}
-                        <textarea
-                          className="textarea atelier-mono min-h-[160px] resize-y py-2 text-xs"
-                          value={draft}
-                          disabled={busy}
-                          onChange={(e) => setDraftTemplates((prev) => ({ ...prev, [b.id]: e.target.value }))}
-                        />
+                          {usedVars.length ? (
+                            <div className="flex flex-wrap gap-1">
+                              {usedVars.map((v) => (
+                                <button
+                                  key={v}
+                                  className="btn btn-ghost btn-sm atelier-mono"
+                                  onClick={async () => {
+                                    const text = `{{` + v + `}}`;
+                                    await copyText(text, { title: "复制失败：请手动复制占位符" });
+                                  }}
+                                  type="button"
+                                >
+                                  {`{{` + v + `}}`}
+                                </button>
+                              ))}
+                            </div>
+                          ) : null}
+                          <textarea
+                            className="textarea atelier-mono min-h-[160px] resize-y py-2 text-xs"
+                            value={draft}
+                            disabled={busy}
+                            onChange={(e) => setDraftTemplates((prev) => ({ ...prev, [b.id]: e.target.value }))}
+                          />
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : null}
-          </div>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
 
-          <PromptStudioPreviewPanel
-            busy={busy}
-            selectedPresetId={preset?.id ?? null}
-            previewTask={previewTask}
-            setPreviewTask={setPreviewTask}
-            tasks={previewTasks}
-            previewLoading={previewLoading}
-            runPreview={runPreview}
-            requestId={previewRequestId}
-            preview={preview}
-            templateErrors={templateErrors}
-            renderLog={renderLog}
-          />
+            <PromptStudioPreviewPanel
+              busy={busy}
+              selectedPresetId={preset?.id ?? null}
+              previewTask={previewTask}
+              setPreviewTask={setPreviewTask}
+              tasks={previewTasks}
+              previewLoading={previewLoading}
+              runPreview={runPreview}
+              requestId={previewRequestId}
+              preview={preview}
+              templateErrors={templateErrors}
+              renderLog={renderLog}
+            />
+          </div>
         </div>
-      </div>
+      </section>
     </div>
   );
 }

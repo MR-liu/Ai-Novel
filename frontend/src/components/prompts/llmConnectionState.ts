@@ -1,5 +1,6 @@
 import type { LLMProfile, LLMProvider } from "../../types";
 
+import { describeLlmProvider, formatLlmProviderModel } from "./llmProviderCopy";
 import type { LlmModelListState } from "./types";
 
 export type LlmModuleAccessStage = "missing_profile" | "missing_key" | "provider_mismatch" | "ready";
@@ -21,8 +22,8 @@ type DeriveOptions = {
 };
 
 function profileSummary(profile: LLMProfile): string {
-  const masked = profile.masked_api_key ? `，Key：${profile.masked_api_key}` : "";
-  return `profile「${profile.name}」(${profile.provider}/${profile.model}${masked})`;
+  const masked = profile.masked_api_key ? `，访问密钥：${profile.masked_api_key}` : "";
+  return `连接档案「${profile.name}」(${formatLlmProviderModel(profile.provider, profile.model)}${masked})`;
 }
 
 function createBlockedState(
@@ -46,25 +47,25 @@ export function deriveLlmModuleAccessState(options: DeriveOptions): LlmModuleAcc
   const boundProfile = options.boundProfile ?? null;
   const effectiveProfile = boundProfile ?? options.selectedProfile ?? null;
   const usingFallback = options.scope === "task" && !boundProfile;
-  const sourceLabel = boundProfile ? "任务绑定 profile" : usingFallback ? "主模块回退 profile" : "主模块 profile";
+  const sourceLabel = boundProfile ? "任务绑定连接档案" : usingFallback ? "主调用模块回退连接档案" : "主调用连接档案";
 
   if (!effectiveProfile) {
     return createBlockedState(
       "missing_profile",
-      "远程状态：未绑定 profile",
+      "连接状态：还没绑定连接档案",
       options.scope === "task"
-        ? "当前任务既没有绑定独立 profile，也没有可回退的主模块 profile。先绑定 profile，再保存 API Key。"
-        : "当前主模块还没有绑定 profile（API 配置库）。先选择或新建 profile，再保存 API Key。",
-      options.scope === "task" ? "请先为该任务绑定 profile，或先设置主模块 profile。" : "请先绑定主模块 profile。",
+        ? "当前任务还没有独立连接档案，也没有可回退的主调用连接档案。先绑定档案，再保存访问密钥。"
+        : "当前主调用模块还没有绑定连接档案。先选择或新建档案，再保存访问密钥。",
+      options.scope === "task" ? "请先为该任务绑定连接档案，或先设置主调用连接档案。" : "请先绑定主调用连接档案。",
     );
   }
 
   if (effectiveProfile.provider !== options.moduleProvider) {
     return createBlockedState(
       "provider_mismatch",
-      "远程状态：provider 不匹配",
-      `当前模块 provider = ${options.moduleProvider}，${sourceLabel} provider = ${effectiveProfile.provider}。先让两者一致，再拉取模型列表或测试连接。`,
-      `${sourceLabel} 与当前模块 provider 不一致。`,
+      "连接状态：模型来源还没对齐",
+      `当前模块的模型来源是 ${describeLlmProvider(options.moduleProvider)}，但${sourceLabel}使用的是 ${describeLlmProvider(effectiveProfile.provider)}。先统一两边，再刷新模型或做连接检查。`,
+      `${sourceLabel}与当前模块的模型来源不一致。`,
       effectiveProfile,
     );
   }
@@ -72,9 +73,9 @@ export function deriveLlmModuleAccessState(options: DeriveOptions): LlmModuleAcc
   if (!effectiveProfile.has_api_key) {
     return createBlockedState(
       "missing_key",
-      "远程状态：已绑定 profile，但未保存 Key",
-      `${sourceLabel} 已绑定，但还没有保存 API Key。保存 Key 后才能拉取模型列表或测试连接。`,
-      `${sourceLabel} 还没有保存 API Key。`,
+      "连接状态：已绑定档案，但还没保存密钥",
+      `${sourceLabel}已绑定，但还没有保存访问密钥。保存后才能刷新模型列表或做连接检查。`,
+      `${sourceLabel} 还没有保存访问密钥。`,
       effectiveProfile,
     );
   }
@@ -82,23 +83,23 @@ export function deriveLlmModuleAccessState(options: DeriveOptions): LlmModuleAcc
   return {
     stage: "ready",
     tone: "success",
-    title: "远程状态：可请求远端",
-    detail: `${sourceLabel} 已就绪：${profileSummary(effectiveProfile)}。现在可以拉取模型列表，也可以测试连接。`,
+    title: "连接状态：可以开始检查",
+    detail: `${sourceLabel}已就绪：${profileSummary(effectiveProfile)}。现在可以刷新模型列表，也可以做连接检查。`,
     actionReason: null,
     effectiveProfile,
   };
 }
 
 export function describeModelListState(modelList: LlmModelListState, accessState: LlmModuleAccessState): string {
-  if (accessState.actionReason) return `当前不可拉取模型列表：${accessState.actionReason}`;
-  if (modelList.loading) return "正在根据当前 provider 和 base_url 拉取模型列表…";
-  if (modelList.error) return `拉取失败：${modelList.error}。仍可手动输入 model。`;
-  if (modelList.warning) return `远端返回提醒：${modelList.warning}。仍可手动输入 model。`;
+  if (accessState.actionReason) return `现在还不能刷新模型列表：${accessState.actionReason}`;
+  if (modelList.loading) return "正在向模型服务刷新候选模型…";
+  if (modelList.error) return `${modelList.error}。你仍然可以手动填写模型名。`;
+  if (modelList.warning) return `模型服务返回提醒：${modelList.warning}。你仍然可以手动填写模型名。`;
   if (modelList.options.length > 0) {
-    return `已拉取 ${modelList.options.length} 个候选模型；可下拉选择，也可手动输入 model。`;
+    return `已刷新 ${modelList.options.length} 个候选模型；可以下拉选择，也可以手动填写模型名。`;
   }
   if (modelList.requestId) {
-    return "已请求远端，但没有返回候选模型；请检查 provider/base_url，或直接手动输入 model。";
+    return "已经请求模型服务，但没有返回候选模型；请检查模型来源和服务地址，或直接手动填写模型名。";
   }
-  return "支持“拉取模型列表 + 手动输入 model”两种方式。";
+  return "支持“刷新候选模型 + 手动填写模型名”两种方式。";
 }

@@ -1,3 +1,9 @@
+import {
+  formatRagDisabledReason,
+  formatRerankMethodLabel,
+  formatVectorContentSourceLabel,
+  formatVectorProviderLabel,
+} from "../../lib/vectorRagCopy";
 import type { VectorRerankObs, VectorSuperSortObs } from "./types";
 
 export function safeJson(obj: unknown): string {
@@ -73,21 +79,19 @@ function rerankDelta(obs: VectorRerankObs): {
 
 export function formatRerankSummary(obs: VectorRerankObs): string {
   const delta = rerankDelta(obs);
-  const comparedText = delta.compared ? `${delta.changedPositions}/${delta.compared}` : "-";
-  const methodText = obs.method ?? "-";
-  const reqText = obs.requested_method || "-";
-  const reasonText = obs.reason ?? "-";
-  const providerText = obs.provider ?? "-";
-  const modelText = obs.model ?? "-";
-  const hybridText =
-    typeof obs.hybrid_alpha === "number" ? ` | hybrid_alpha:${obs.hybrid_alpha}` : obs.hybrid_alpha === null ? "" : "";
-  const hybridAppliedText =
-    typeof obs.hybrid_applied === "boolean" ? ` | hybrid_applied:${String(obs.hybrid_applied)}` : "";
-  const errText = obs.error_type ? ` | error:${obs.error_type}` : "";
+  const comparedText = delta.compared ? `${delta.changedPositions}/${delta.compared}` : "无变化样本";
+  const methodText = formatRerankMethodLabel(obs.method ?? "", "未返回");
+  const reqText = formatRerankMethodLabel(obs.requested_method || "", "未返回");
+  const reasonText = formatRagDisabledReason(obs.reason);
+  const providerText = formatVectorProviderLabel(obs.provider ?? "", "未返回");
+  const modelText = obs.model ?? "未返回";
+  const hybridText = typeof obs.hybrid_alpha === "number" ? ` | 混合权重:${obs.hybrid_alpha}` : "";
+  const hybridAppliedText = typeof obs.hybrid_applied === "boolean" ? ` | 本次混合:${obs.hybrid_applied ? "已参与" : "未参与"}` : "";
+  const errText = obs.error_type ? ` | 错误类型:${obs.error_type}` : "";
   const changesText = delta.compared
-    ? ` | changed_in_top_k:${comparedText} | entered:${delta.entered} | left:${delta.left}`
+    ? ` | top_k 内变化:${comparedText} | 新进入:${delta.entered} | 被替换:${delta.left}`
     : "";
-  return `enabled:${String(obs.enabled)} | applied:${String(obs.applied)} | reason:${reasonText} | requested:${reqText} | method:${methodText} | provider:${providerText} | model:${modelText}${hybridText}${hybridAppliedText} | top_k:${obs.top_k} | timing_ms:${obs.timing_ms}${changesText}${errText}`;
+  return `${obs.enabled ? "已启用" : "未启用"} | ${obs.applied ? "本次已参与排序" : "本次未参与排序"} | 原因:${reasonText} | 请求方式:${reqText} | 实际方式:${methodText} | 服务:${providerText} | 模型:${modelText}${hybridText}${hybridAppliedText} | 候选数:${obs.top_k} | 耗时:${obs.timing_ms}ms${changesText}${errText}`;
 }
 
 export function normalizeSuperSortObs(raw: unknown): VectorSuperSortObs | null {
@@ -124,38 +128,44 @@ export function normalizeSuperSortObs(raw: unknown): VectorSuperSortObs | null {
 }
 
 export function formatSuperSortSummary(obs: VectorSuperSortObs): string {
-  const reasonText = obs.reason ?? "-";
+  const reasonText = formatRagDisabledReason(obs.reason);
   const bySourceText = obs.by_source
     ? Object.entries(obs.by_source)
-        .map(([k, v]) => `${k}:${v}`)
+        .map(([k, v]) => `${formatVectorContentSourceLabel(k, k)} ${v}`)
         .join(" | ")
-    : "-";
+    : "未返回";
   const orderText = obs.source_order_effective?.length
-    ? obs.source_order_effective.join(",")
+    ? obs.source_order_effective.map((source) => formatVectorContentSourceLabel(source, source)).join("、")
     : obs.source_order?.length
-      ? obs.source_order.join(",")
-      : "-";
-  return `enabled:${String(obs.enabled)} | applied:${String(obs.applied)} | reason:${reasonText} | order:${orderText} | by_source:${bySourceText}`;
+      ? obs.source_order.map((source) => formatVectorContentSourceLabel(source, source)).join("、")
+      : "未返回";
+  return `${obs.enabled ? "已启用" : "未启用"} | ${obs.applied ? "本次已应用" : "本次未应用"} | 原因:${reasonText} | 来源顺序:${orderText} | 各来源命中:${bySourceText}`;
 }
 
 export function formatHybridCounts(raw: unknown): string {
   if (!raw || typeof raw !== "object") return "-";
   const o = raw as Record<string, unknown>;
   const parts: string[] = [];
+  const labels: Record<string, string> = { vector: "向量", fts: "关键词", union: "合并后" };
   for (const key of ["vector", "fts", "union"] as const) {
     const v = o[key];
     const n = typeof v === "number" ? v : Number(v);
-    if (Number.isFinite(n)) parts.push(`${key}:${n}`);
+    if (Number.isFinite(n)) parts.push(`${labels[key]} ${n}`);
   }
   if (parts.length) return parts.join(" | ");
   const fallback = Object.entries(o)
     .map(([k, v]) => {
       const n = typeof v === "number" ? v : Number(v);
-      return Number.isFinite(n) ? `${k}:${n}` : null;
+      return Number.isFinite(n) ? `${k} ${n}` : null;
     })
     .filter((v): v is string => Boolean(v));
   return fallback.length ? fallback.join(" | ") : "-";
 }
+
+const OVERFILTER_ACTION_LABELS: Record<string, string> = {
+  relax_sources: "放宽资料来源限制",
+  expand_candidates: "扩大候选范围",
+};
 
 export function formatOverfilter(raw: unknown): string {
   if (!raw || typeof raw !== "object") return "-";
@@ -163,15 +173,17 @@ export function formatOverfilter(raw: unknown): string {
   const enabled = Boolean(o.enabled);
   const actions = Array.isArray(o.actions) ? o.actions.map((v) => String(v)).filter((v) => Boolean(v)) : [];
   const usedSources = Array.isArray(o.used_sources)
-    ? o.used_sources.map((v) => String(v)).filter((v) => Boolean(v))
+    ? o.used_sources.map((v) => formatVectorContentSourceLabel(String(v), String(v))).filter((v) => Boolean(v))
     : [];
   const vectorK = typeof o.vector_k === "number" ? o.vector_k : Number(o.vector_k);
   const ftsK = typeof o.fts_k === "number" ? o.fts_k : Number(o.fts_k);
 
-  const parts = [`enabled:${String(enabled)}`];
-  if (actions.length) parts.push(`actions:${actions.join(",")}`);
-  if (usedSources.length) parts.push(`used_sources:${usedSources.join(",")}`);
-  if (Number.isFinite(vectorK)) parts.push(`vector_k:${vectorK}`);
-  if (Number.isFinite(ftsK)) parts.push(`fts_k:${ftsK}`);
+  const parts = [enabled ? "已启用" : "未启用"];
+  if (actions.length) {
+    parts.push(`动作:${actions.map((value) => OVERFILTER_ACTION_LABELS[value] ?? value.replaceAll("_", " ")).join("、")}`);
+  }
+  if (usedSources.length) parts.push(`实际来源:${usedSources.join("、")}`);
+  if (Number.isFinite(vectorK)) parts.push(`向量候选:${vectorK}`);
+  if (Number.isFinite(ftsK)) parts.push(`关键词候选:${ftsK}`);
   return parts.join(" | ");
 }

@@ -3,8 +3,19 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { createRequestSeqGuard } from "../../lib/requestSeqGuard";
 import { ApiError, apiDownloadAttachment, apiJson } from "../../services/apiClient";
 import { Drawer } from "../ui/Drawer";
+import { FeedbackCallout, FeedbackDisclosure, FeedbackEmptyState } from "../ui/Feedback";
 import { useToast } from "../ui/toast";
+import { getGenerationRunStage, getMcpRunSummary } from "./generationRunStages";
 import type { GenerationRun } from "./types";
+import {
+  getWritingMemoryModuleLabel,
+  WRITING_RESEARCH_COPY,
+} from "./writingModuleLabels";
+import {
+  WritingDrawerHeader,
+  WritingDrawerSection,
+  type WritingDrawerMetaItem,
+} from "./WritingDrawerWorkbench";
 
 type Props = {
   open: boolean;
@@ -14,6 +25,36 @@ type Props = {
   selectedRun: GenerationRun | null;
   onSelectRun: (run: GenerationRun) => void;
 };
+
+const STAGE_LABELS: Record<string, string> = {
+  plan: "规划",
+  generate: "正文生成",
+  post_edit: "后处理",
+  content_optimize: "内容优化",
+  mcp: WRITING_RESEARCH_COPY.mcpStageLabel,
+  memory_update: "连续性更新",
+  unknown: "未知阶段",
+};
+
+const MEMORY_SECTION_LABELS: Record<string, string> = {
+  worldbook: "世界书",
+  story_memory: "剧情记忆",
+  semantic_history: "语义历史",
+  foreshadow_open_loops: "未回收伏笔",
+  structured: "结构化资料",
+  tables: "表格系统",
+  vector_rag: "资料召回",
+  graph: "关系图",
+  fractal: "剧情脉络",
+};
+
+function formatStageLabel(stage: string): string {
+  return (STAGE_LABELS[stage] ?? stage) || STAGE_LABELS.unknown;
+}
+
+function formatMemorySectionLabel(section: string): string {
+  return MEMORY_SECTION_LABELS[section] ?? getWritingMemoryModuleLabel(section);
+}
 
 export function GenerationHistoryDrawer(props: Props) {
   const { onClose, open } = props;
@@ -28,6 +69,9 @@ export function GenerationHistoryDrawer(props: Props) {
   const pipelineGuardRef = useRef(createRequestSeqGuard());
 
   const selectedRun = props.selectedRun;
+  const mcpSummary = getMcpRunSummary(selectedRun);
+  const selectedStage = selectedRun ? getGenerationRunStage(String(selectedRun.type ?? "")) : "未选择";
+  const selectedStageLabel = selectedRun ? formatStageLabel(selectedStage) : "未选择";
   const paramsObj =
     selectedRun?.params && typeof selectedRun.params === "object"
       ? (selectedRun.params as Record<string, unknown>)
@@ -118,21 +162,20 @@ export function GenerationHistoryDrawer(props: Props) {
     const sorted = [...pipelineRuns].sort(
       (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
     );
-    return sorted.map((r) => {
-      const type = String(r.type ?? "");
-      const stage =
-        type === "plan_chapter"
-          ? "plan"
-          : type === "chapter" || type === "chapter_stream"
-            ? "generate"
-            : type === "post_edit" || type === "post_edit_sanitize"
-              ? "post_edit"
-              : type.startsWith("memory_update")
-                ? "memory_update"
-                : type || "unknown";
-      return { run: r, stage };
-    });
+    return sorted.map((r) => ({ run: r, stage: getGenerationRunStage(String(r.type ?? "")) }));
   }, [pipelineRuns]);
+  const headerMeta = useMemo<WritingDrawerMetaItem[]>(
+    () => [
+      { label: "最近记录", value: `${props.runs.length} 条` },
+      { label: "当前阶段", value: selectedStageLabel },
+      {
+        label: "当前结果",
+        value: selectedRun ? (selectedRun.error ? "本次失败" : "可查看详情") : "等待选择记录",
+        tone: selectedRun ? (selectedRun.error ? "warning" : "success") : "default",
+      },
+    ],
+    [props.runs.length, selectedRun, selectedStageLabel],
+  );
 
   return (
     <Drawer
@@ -141,25 +184,46 @@ export function GenerationHistoryDrawer(props: Props) {
       ariaLabelledBy={titleId}
       panelClassName="h-full w-full max-w-2xl border-l border-border bg-canvas p-6 shadow-sm"
     >
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="font-content text-2xl text-ink" id={titleId}>
-            生成记录
-          </div>
-          <div className="mt-1 text-xs text-subtext">最近 5 条</div>
-        </div>
-        <button className="btn btn-secondary" aria-label="关闭" onClick={onClose} type="button">
-          关闭
-        </button>
-      </div>
+      <WritingDrawerHeader
+        titleId={titleId}
+        kicker="生成回看"
+        title="生成记录"
+        description="这里把一次次起草、重写和资料收集串起来，方便你回看哪一步出了偏差，或把好的结果重新拿回来。"
+        meta={headerMeta}
+        actions={
+          <button className="btn btn-secondary" aria-label="关闭" onClick={onClose} type="button">
+            关闭
+          </button>
+        }
+        callout={
+          selectedRun ? (
+            <div>
+              当前选中阶段：{selectedStageLabel}。
+              {selectedRun.error ? "这条记录有错误输出，可先下载排障包。" : "如果结果不错，可以继续查看提示词和输出细节。"}
+            </div>
+          ) : (
+            <div>先从左侧挑一条记录，再看右侧的提示词、输出和资料检索链路。</div>
+          )
+        }
+      />
 
       <div className="mt-5 grid gap-4">
         {props.loading ? <div className="text-sm text-subtext">加载中...</div> : null}
 
         <div className="grid gap-3 md:grid-cols-2">
-          <div className="rounded-atelier border border-border bg-surface p-2">
+          <WritingDrawerSection
+            kicker="最近记录"
+            title="按时间回看"
+            copy="先选中一条记录，再到右侧看它的提示词、输出和串联流水线。"
+            className="p-2"
+          >
             {props.runs.length === 0 ? (
-              <div className="p-3 text-sm text-subtext">暂无生成记录。</div>
+              <FeedbackEmptyState
+                variant="compact"
+                kicker="最近记录"
+                title="暂无生成记录"
+                description="等你完成一次起草、后处理或连续性更新后，这里就会开始累积可回看的链路。"
+              />
             ) : (
               <div className="flex flex-col gap-1">
                 {props.runs.map((r) => {
@@ -179,53 +243,77 @@ export function GenerationHistoryDrawer(props: Props) {
                       <div className="flex items-center justify-between gap-2">
                         <div className="min-w-0 truncate">
                           <span className="mr-2 text-xs text-subtext">{new Date(r.created_at).toLocaleString()}</span>
-                          <span className="truncate">{r.type}</span>
+                          <span className="truncate">{formatStageLabel(getGenerationRunStage(String(r.type ?? "")))}</span>
                         </div>
-                        <span className="shrink-0 text-[11px] text-subtext">{failed ? "failed" : "ok"}</span>
+                        <span className="shrink-0 text-[11px] text-subtext">{failed ? "失败" : "完成"}</span>
                       </div>
+                      <div className="mt-1 truncate text-[11px] text-subtext">{String(r.type ?? "")}</div>
                     </button>
                   );
                 })}
               </div>
             )}
-          </div>
+          </WritingDrawerSection>
 
-          <div className="rounded-atelier border border-border bg-surface p-4">
+          <WritingDrawerSection
+            kicker="选中详情"
+            title={selectedRun ? selectedStageLabel : "等待选择记录"}
+            copy="这里集中显示当前记录的模型、提示词、输出和按定位编号串起来的处理链路。"
+          >
             {!selectedRun ? (
-              <div className="text-sm text-subtext">选择一条记录查看详情。</div>
+              <FeedbackEmptyState
+                variant="compact"
+                kicker="选中详情"
+                title="等待选择记录"
+                description="先在左侧挑一条生成记录，再看它的提示词、输出和按定位编号串起来的处理链路。"
+              />
             ) : (
               <div className="grid gap-3">
-                <div className="text-sm text-ink">{selectedRun.type}</div>
-                <div className="text-xs text-subtext">
-                  {selectedRun.provider ?? "unknown"} / {selectedRun.model ?? "unknown"}
+                <div className="drawer-workbench-subcard">
+                  <div className="text-sm text-ink">{selectedStageLabel}</div>
+                  <div className="mt-1 text-xs text-subtext">
+                    类型：{String(selectedRun.type ?? "未记录")} | 模型：{selectedRun.provider ?? "未记录"} /{" "}
+                    {selectedRun.model ?? "未记录"}
+                  </div>
                 </div>
-                <div className="flex items-center gap-2 text-xs text-subtext">
-                  <span className="truncate">run_id: {selectedRun.id}</span>
-                  <button
-                    className="btn btn-ghost px-2 py-1 text-xs"
-                    onClick={async () => {
-                      await navigator.clipboard.writeText(selectedRun.id ?? "");
-                    }}
-                    type="button"
-                  >
-                    复制
-                  </button>
-                </div>
-                {selectedRun.request_id ? (
-                  <div className="flex items-center gap-2 text-xs text-subtext">
-                    <span className="truncate">request_id: {selectedRun.request_id}</span>
+                {mcpSummary ? (
+                  <div className="drawer-workbench-subcard text-xs text-subtext">
+                    <div className="text-xs text-ink">{WRITING_RESEARCH_COPY.mcpSummaryTitle}</div>
+                    <div className="mt-1">工具：{mcpSummary.toolName}</div>
+                    {mcpSummary.purpose ? <div>目的：{mcpSummary.purpose}</div> : null}
+                    {mcpSummary.timeoutSeconds ? <div>超时：{mcpSummary.timeoutSeconds} 秒</div> : null}
+                    {mcpSummary.maxOutputChars ? <div>输出上限：{mcpSummary.maxOutputChars} 字符</div> : null}
+                  </div>
+                ) : null}
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <div className="drawer-workbench-subcard flex items-center justify-between gap-2 text-xs text-subtext">
+                    <span className="truncate">运行编号：{selectedRun.id}</span>
                     <button
                       className="btn btn-ghost px-2 py-1 text-xs"
                       onClick={async () => {
-                        await navigator.clipboard.writeText(selectedRun.request_id ?? "");
+                        await navigator.clipboard.writeText(selectedRun.id ?? "");
                       }}
                       type="button"
                     >
                       复制
                     </button>
                   </div>
-                ) : null}
-                <div>
+                  {selectedRun.request_id ? (
+                    <div className="drawer-workbench-subcard flex items-center justify-between gap-2 text-xs text-subtext">
+                      <span className="truncate">定位编号：{selectedRun.request_id}</span>
+                      <button
+                        className="btn btn-ghost px-2 py-1 text-xs"
+                        onClick={async () => {
+                          await navigator.clipboard.writeText(selectedRun.request_id ?? "");
+                        }}
+                        type="button"
+                      >
+                        复制
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+                <div className="drawer-workbench-subcard">
                   <button
                     className="btn btn-secondary"
                     disabled={downloading}
@@ -234,34 +322,34 @@ export function GenerationHistoryDrawer(props: Props) {
                   >
                     {downloading ? "下载中..." : "下载排障包"}
                   </button>
-                  <div className="mt-2 rounded-atelier border border-border bg-canvas p-3 text-[11px] text-subtext">
-                    <div className="text-xs text-ink">排障包说明</div>
-                    <ul className="mt-1 list-disc pl-5">
-                      <li>用途：定位生成失败、提示词渲染、记忆检索注入等问题</li>
-                      <li>提示：可能包含隐私/敏感内容，分享前请确认并避免公开传播</li>
-                      <li>安全：按设计不应包含 API Key；分享前仍建议自行快速检索</li>
-                    </ul>
+                  <div className="mt-3 text-[11px] leading-6 text-subtext">
+                    用途：定位生成失败、提示词渲染和资料检索注入等问题。风险：文件里可能含有隐私内容，分享前请先确认；按设计不应包含 API Key，但仍建议快速检索一遍。
                   </div>
                 </div>
 
-                <details open>
-                  <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                    流水线视图（按 request_id 串联）
-                  </summary>
+                <FeedbackDisclosure
+                  defaultOpen
+                  className="drawer-workbench-disclosure"
+                  summaryClassName="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink"
+                  title="整次生成链路（按定位编号串联）"
+                >
                   <div className="mt-2 grid gap-2">
                     {pipelineLoading ? <div className="text-xs text-subtext">加载中...</div> : null}
                     {pipelineError ? (
-                      <div className="text-xs text-danger">
+                      <FeedbackCallout tone="danger" title="流水线加载失败">
                         {pipelineError.code}: {pipelineError.message}
                         {pipelineError.requestId ? (
-                          <span className="ml-2">request_id: {pipelineError.requestId}</span>
+                          <span className="ml-2">定位编号: {pipelineError.requestId}</span>
                         ) : null}
-                      </div>
+                      </FeedbackCallout>
                     ) : null}
                     {pipelineSteps.length === 0 && !pipelineLoading ? (
-                      <div className="text-xs text-subtext">
-                        暂无可串联的流水线 runs（该 run 可能缺少 request_id）。
-                      </div>
+                      <FeedbackEmptyState
+                        variant="compact"
+                        kicker="流水线"
+                        title="暂无可串联的处理记录"
+                        description="这条记录可能缺少定位编号，因此暂时无法把前后链路完整串起来。"
+                      />
                     ) : (
                       <div className="grid gap-2">
                         {pipelineSteps.map(({ run, stage }) => {
@@ -270,7 +358,7 @@ export function GenerationHistoryDrawer(props: Props) {
                           return (
                             <button
                               key={run.id}
-                              aria-label={`pipeline run_id: ${String(run.id ?? "")} ${failed ? "failed" : "ok"}`}
+                              aria-label={`pipeline 运行编号: ${String(run.id ?? "")} ${failed ? "失败" : "完成"}`}
                               className={
                                 active
                                   ? "ui-focus-ring ui-transition-fast rounded-atelier border border-accent/40 bg-accent/10 px-3 py-2 text-left text-xs text-ink"
@@ -281,17 +369,17 @@ export function GenerationHistoryDrawer(props: Props) {
                             >
                               <div className="flex items-center justify-between gap-2">
                                 <div className="min-w-0 truncate">
-                                  <span className="mr-2 font-mono">{stage}</span>
+                                  <span className="mr-2">{formatStageLabel(stage)}</span>
                                   <span className="mr-2 font-mono">{String(run.type ?? "")}</span>
-                                  <span className="truncate font-mono">run_id: {String(run.id ?? "")}</span>
+                                  <span className="truncate font-mono">运行编号: {String(run.id ?? "")}</span>
                                 </div>
                                 <span className="shrink-0 font-mono text-[11px] text-subtext">
-                                  {failed ? "failed" : "ok"}
+                                  {failed ? "失败" : "完成"}
                                 </span>
                               </div>
                               {run.request_id ? (
                                 <div className="mt-1 truncate font-mono text-[11px] text-subtext">
-                                  request_id: {String(run.request_id ?? "")}
+                                  定位编号: {String(run.request_id ?? "")}
                                 </div>
                               ) : null}
                             </button>
@@ -300,20 +388,24 @@ export function GenerationHistoryDrawer(props: Props) {
                       </div>
                     )}
                   </div>
-                </details>
+                </FeedbackDisclosure>
 
                 {memoryLog ? (
-                  <details open>
-                    <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                      memory_retrieval_log_json
-                    </summary>
-                    <div className="mt-2 grid gap-2 text-xs text-subtext">
+                  <FeedbackDisclosure
+                    defaultOpen
+                    className="drawer-workbench-disclosure"
+                    summaryClassName="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink"
+                    title="记忆取材记录（memory_retrieval_log_json）"
+                  >
+                    <div className="mt-3 grid gap-2 text-xs text-subtext">
                       <div>
-                        enabled: {String(memoryLog.enabled ?? "")} | phase: {String(memoryLog.phase ?? "")}
+                        是否启用：{Boolean(memoryLog.enabled) ? "已启用" : "未启用"} | 所处阶段：{String(memoryLog.phase ?? "未记录")}
                       </div>
-                      <div className="truncate">query_text: {String(memoryLog.query_text ?? "")}</div>
+                      <div className="truncate">本次取材问题：{String(memoryLog.query_text ?? "")}</div>
                       {Array.isArray(memoryLog.errors) && memoryLog.errors.length ? (
-                        <div className="text-warning">errors: {memoryLog.errors.join(", ")}</div>
+                        <FeedbackCallout className="text-xs" tone="warning" title="记忆检索返回提醒">
+                          {memoryLog.errors.join(", ")}
+                        </FeedbackCallout>
                       ) : null}
                     </div>
 
@@ -326,13 +418,18 @@ export function GenerationHistoryDrawer(props: Props) {
                             const enabled = Boolean(o.enabled);
                             const disabledReason = typeof o.disabled_reason === "string" ? o.disabled_reason : null;
                             return (
-                              <div key={section} className="rounded-atelier border border-border bg-canvas p-2">
+                              <div key={section} className="drawer-workbench-subcard">
                                 <div className="flex items-center justify-between gap-2 text-xs">
-                                  <span className="font-mono text-ink">{section}</span>
+                                  <span className="text-ink">
+                                    {formatMemorySectionLabel(section)}
+                                    <span className="ml-2 font-mono text-[11px] text-subtext">{section}</span>
+                                  </span>
                                   {enabled ? (
-                                    <span className="text-success">enabled</span>
+                                    <span className="text-success">已启用</span>
                                   ) : (
-                                    <span className="text-warning">disabled: {disabledReason ?? "unknown"}</span>
+                                    <span className="rounded-full border border-warning/30 bg-warning/10 px-2 py-0.5 text-[11px] text-warning">
+                                      已关闭：{disabledReason ?? "未知原因"}
+                                    </span>
                                   )}
                                 </div>
                               </div>
@@ -340,48 +437,55 @@ export function GenerationHistoryDrawer(props: Props) {
                           })}
                       </div>
                     ) : (
-                      <pre className="mt-2 max-h-40 overflow-auto rounded-atelier border border-border bg-canvas p-3 text-xs text-ink">
+                      <pre className="drawer-workbench-codeblock mt-3">
                         {JSON.stringify(memoryLog, null, 2)}
                       </pre>
                     )}
-                  </details>
+                  </FeedbackDisclosure>
                 ) : null}
 
-                <details open>
-                  <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                    params
-                  </summary>
-                  <pre className="mt-2 max-h-40 overflow-auto rounded-atelier border border-border bg-canvas p-3 text-xs text-ink">
+                <FeedbackDisclosure
+                  defaultOpen
+                  className="drawer-workbench-disclosure"
+                  summaryClassName="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink"
+                  title="这次运行设置（params）"
+                >
+                  <div className="mt-3 text-xs text-subtext">这里记录的是这次生成真正使用的设置与控制项，适合在你怀疑“为什么这次结果不一样”时回看。</div>
+                  <pre className="drawer-workbench-codeblock mt-3">
                     {JSON.stringify(selectedRun.params ?? {}, null, 2)}
                   </pre>
-                </details>
-                <details>
-                  <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                    prompt_system
-                  </summary>
-                  <pre className="mt-2 max-h-40 overflow-auto rounded-atelier border border-border bg-canvas p-3 text-xs text-ink">
+                </FeedbackDisclosure>
+                <FeedbackDisclosure
+                  className="drawer-workbench-disclosure"
+                  summaryClassName="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink"
+                  title="系统提示词正文"
+                >
+                  <pre className="drawer-workbench-codeblock mt-3">
                     {selectedRun.prompt_system ?? ""}
                   </pre>
-                </details>
-                <details>
-                  <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                    prompt_user
-                  </summary>
-                  <pre className="mt-2 max-h-40 overflow-auto rounded-atelier border border-border bg-canvas p-3 text-xs text-ink">
+                </FeedbackDisclosure>
+                <FeedbackDisclosure
+                  className="drawer-workbench-disclosure"
+                  summaryClassName="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink"
+                  title="用户提示词正文"
+                >
+                  <pre className="drawer-workbench-codeblock mt-3">
                     {selectedRun.prompt_user ?? ""}
                   </pre>
-                </details>
-                <details open>
-                  <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                    output / error
-                  </summary>
-                  <pre className="mt-2 max-h-56 overflow-auto rounded-atelier border border-border bg-canvas p-3 text-xs text-ink">
+                </FeedbackDisclosure>
+                <FeedbackDisclosure
+                  defaultOpen
+                  className="drawer-workbench-disclosure"
+                  summaryClassName="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink"
+                  title="生成结果或错误记录"
+                >
+                  <pre className="drawer-workbench-codeblock mt-3">
                     {selectedRun.error ? JSON.stringify(selectedRun.error, null, 2) : (selectedRun.output_text ?? "")}
                   </pre>
-                </details>
+                </FeedbackDisclosure>
               </div>
             )}
-          </div>
+          </WritingDrawerSection>
         </div>
       </div>
     </Drawer>

@@ -27,13 +27,9 @@ from app.core.logging import exception_log_fields, log_event
 from app.db.session import SessionLocal
 from app.db.utils import new_id
 from app.llm.client import call_llm_messages, call_llm_stream_messages
-from app.llm.messages import ChatMessage, coalesce_system, flatten_messages
-from app.llm.redaction import redact_text
+from app.llm.messages import ChatMessage
 from app.models.chapter import Chapter
-from app.models.character import Character
 from app.models.generation_run import GenerationRun
-from app.models.outline import Outline
-from app.models.project import Project
 from app.models.project_settings import ProjectSettings
 from app.schemas.chapters import (
     BulkCreateRequest,
@@ -46,15 +42,21 @@ from app.schemas.chapters import (
 )
 from app.schemas.chapter_generate import ChapterGenerateRequest
 from app.schemas.chapter_plan import ChapterPlanRequest
-from app.services.generation_service import build_run_params_json, call_llm_and_record, prepare_llm_call, with_param_overrides
+from app.services.chapter_generation_flow import (
+    find_missing_prereq_numbers as _find_missing_prereq_numbers,
+    prepare_chapter_generate_request,
+    prepare_plan_chapter_request,
+    render_chapter_prompt_bundle,
+    resolve_chapter_auto_update_token,
+    resolve_macro_seed as _resolve_macro_seed,
+)
+from app.services.generation_service import build_run_params_json, with_param_overrides
 from app.services.generation_pipeline import (
     run_chapter_generate_llm_step,
     run_content_optimize_step,
-    run_mcp_research_step,
     run_plan_llm_step,
     run_post_edit_step,
 )
-from app.services.llm_task_preset_resolver import resolve_task_llm_config, resolve_task_preset
 from app.services.llm_retry import (
     compute_backoff_seconds,
     is_retryable_llm_error,
@@ -64,18 +66,9 @@ from app.services.llm_retry import (
     task_llm_retry_max_seconds,
 )
 from app.services.length_control import estimate_max_tokens
-from app.services.mcp.service import McpResearchConfig as McpResearchConfigSvc
-from app.services.mcp.service import McpToolCall as McpToolCallSvc
 from app.services.output_contracts import contract_for_task
 from app.services.outline_store import ensure_active_outline
-from app.services.chapter_context_service import (
-    build_chapter_generate_render_values,
-    inject_plan_into_render_values,
-)
-from app.services.memory_query_service import normalize_query_text, parse_query_preprocessing_config
-from app.services.memory_retrieval_service import build_memory_retrieval_log_json, retrieve_memory_context_pack
-from app.services.prompt_presets import ensure_default_plan_preset, ensure_default_post_edit_preset, render_preset_for_task
-from app.services.prompt_store import format_characters
+from app.services.chapter_context_service import inject_plan_into_render_values
 from app.services.project_task_service import schedule_chapter_done_tasks
 from app.services.run_store import write_generation_run
 from app.services.search_index_service import schedule_search_rebuild_task
@@ -95,9 +88,6 @@ from app.utils.sse_response import (
 router = APIRouter()
 logger = logging.getLogger("ainovel")
 
-PREVIOUS_CHAPTER_ENDING_CHARS = 1000
-CURRENT_DRAFT_TAIL_CHARS = 1200
-_MAX_MACRO_SEED_CHARS = 256
 DEFAULT_CHAPTER_META_LIMIT = 200
 MAX_CHAPTER_META_LIMIT = 500
 SSE_BLOCKING_STEP_HEARTBEAT_SECONDS = 1.0
@@ -115,291 +105,6 @@ class ChapterTriggerAutoUpdates(BaseModel):
         max_length=36,
         description="用于幂等的 token（优先使用 generation_run_id；不提供则回退 chapter.updated_at）",
     )
-
-
-def _resolve_macro_seed(*, request_id: str, body: object) -> str:
-    seed = str(getattr(body, "macro_seed", "") or "").strip()
-    if not seed:
-        return request_id
-    return seed[:_MAX_MACRO_SEED_CHARS]
-
-
-def _apply_prompt_override(
-    *,
-    prompt_system: str,
-    prompt_user: str,
-    prompt_messages: list[ChatMessage],
-    body: ChapterGenerateRequest,
-) -> tuple[str, str, list[ChatMessage], bool]:
-    override = body.prompt_override
-    if override is None:
-        return prompt_system, prompt_user, prompt_messages, False
-
-    override_messages: list[ChatMessage] = []
-    for item in override.messages or []:
-        role = str(item.role or "user").strip() or "user"
-        content = str(item.content or "")
-        name = str(item.name).strip() if isinstance(item.name, str) and item.name.strip() else None
-        override_messages.append(ChatMessage(role=role, content=content, name=name))
-    if override_messages:
-        system, non_system = coalesce_system(override_messages)
-        user = flatten_messages(non_system)
-        return system, user, override_messages, True
-
-    next_system = prompt_system if override.system is None else str(override.system or "")
-    next_user = prompt_user if override.user is None else str(override.user or "")
-    next_messages: list[ChatMessage] = []
-    if next_system.strip():
-        next_messages.append(ChatMessage(role="system", content=next_system))
-    if next_user.strip():
-        next_messages.append(ChatMessage(role="user", content=next_user))
-    return next_system, next_user, next_messages, True
-
-
-def _redact_prompt_override_for_params(body: ChapterGenerateRequest) -> dict[str, object] | None:
-    override = body.prompt_override
-    if override is None:
-        return None
-    data = override.model_dump()
-    if isinstance(data.get("system"), str):
-        data["system"] = redact_text(data["system"])
-    if isinstance(data.get("user"), str):
-        data["user"] = redact_text(data["user"])
-
-    messages = data.get("messages")
-    if isinstance(messages, list):
-        for item in messages:
-            if not isinstance(item, dict):
-                continue
-            if isinstance(item.get("content"), str):
-                item["content"] = redact_text(item["content"])
-    return data
-
-
-def _redact_prompt_preview_for_params(
-    *, prompt_system: str, prompt_user: str, prompt_messages: list[ChatMessage]
-) -> dict[str, object]:
-    return {
-        "system": redact_text(prompt_system or ""),
-        "user": redact_text(prompt_user or ""),
-        "messages": [{"role": m.role, "content": redact_text(m.content or ""), "name": m.name} for m in prompt_messages],
-    }
-
-
-def _build_prompt_inspector_params(
-    *,
-    macro_seed: str,
-    prompt_overridden: bool,
-    body: ChapterGenerateRequest,
-    precheck_prompt_system: str,
-    precheck_prompt_user: str,
-    precheck_prompt_messages: list[ChatMessage],
-    final_prompt_system: str,
-    final_prompt_user: str,
-    final_prompt_messages: list[ChatMessage],
-) -> dict[str, object]:
-    out: dict[str, object] = {
-        "macro_seed": macro_seed,
-        "prompt_overridden": bool(prompt_overridden),
-        "precheck": _redact_prompt_preview_for_params(
-            prompt_system=precheck_prompt_system,
-            prompt_user=precheck_prompt_user,
-            prompt_messages=precheck_prompt_messages,
-        ),
-        "final": _redact_prompt_preview_for_params(
-            prompt_system=final_prompt_system,
-            prompt_user=final_prompt_user,
-            prompt_messages=final_prompt_messages,
-        ),
-    }
-    override = _redact_prompt_override_for_params(body)
-    if override is not None:
-        out["override"] = override
-    return out
-
-
-def _build_mcp_research_config(body: ChapterGenerateRequest) -> McpResearchConfigSvc:
-    cfg = getattr(body, "mcp_research", None)
-    if cfg is None:
-        return McpResearchConfigSvc(enabled=False, allowlist=[], calls=[])
-
-    calls: list[McpToolCallSvc] = []
-    for item in getattr(cfg, "calls", None) or []:
-        tool_name = str(getattr(item, "tool_name", "") or "").strip()
-        if not tool_name:
-            continue
-        args = getattr(item, "args", None)
-        calls.append(McpToolCallSvc(tool_name=tool_name, args=args if isinstance(args, dict) else {}))
-
-    allowlist = list(getattr(cfg, "allowlist", None) or [])
-    return McpResearchConfigSvc(
-        enabled=bool(getattr(cfg, "enabled", False)),
-        allowlist=[str(x).strip() for x in allowlist if isinstance(x, str) and str(x).strip()],
-        calls=calls,
-        timeout_seconds=getattr(cfg, "timeout_seconds", None),
-        max_output_chars=getattr(cfg, "max_output_chars", None),
-    )
-
-
-def _inject_mcp_research_into_values(*, values: dict[str, object], context_md: str) -> None:
-    text = str(context_md or "").strip()
-    if not text:
-        return
-
-    base_instruction = str(values.get("instruction") or "").rstrip()
-    user_obj = values.get("user")
-    if isinstance(user_obj, dict):
-        base = str(user_obj.get("instruction") or "").rstrip()
-        user_obj["instruction"] = (base + "\n\n【资料收集 - 参考资料】\n" + text).strip()
-    values["instruction"] = (base_instruction + "\n\n【资料收集 - 参考资料】\n" + text).strip()
-    values["mcp_research"] = text
-
-
-def _mcp_research_params(*, cfg: McpResearchConfigSvc, applied: bool, tool_run_ids: list[str], warnings: list[str]) -> dict[str, object]:
-    return {
-        "enabled": bool(cfg.enabled),
-        "applied": bool(applied),
-        "allowlist": list(cfg.allowlist or []),
-        "tool_run_ids": list(tool_run_ids),
-        "warnings": list(warnings or []),
-    }
-
-
-@dataclass(frozen=True, slots=True)
-class _ChapterMemoryPreparation:
-    memory_pack: dict[str, object] | None
-    memory_injection_config: dict[str, object] | None
-    memory_retrieval_log_json: dict[str, object] | None
-
-
-def _resolve_memory_modules(raw_modules: dict[str, bool]) -> dict[str, bool]:
-    return {
-        "worldbook": bool(raw_modules.get("worldbook", True)),
-        "story_memory": bool(raw_modules.get("story_memory", True)),
-        "semantic_history": bool(raw_modules.get("semantic_history", False)),
-        "foreshadow_open_loops": bool(raw_modules.get("foreshadow_open_loops", False)),
-        "structured": bool(raw_modules.get("structured", True)),
-        "tables": bool(raw_modules.get("tables", True)),
-        "vector_rag": bool(raw_modules.get("vector_rag", True)),
-        "graph": bool(raw_modules.get("graph", True)),
-        "fractal": bool(raw_modules.get("fractal", True)),
-    }
-
-
-def _prepare_chapter_memory_injection(
-    *,
-    db: Session,
-    project_id: str,
-    chapter: Chapter,
-    body: ChapterGenerateRequest,
-    settings_row: ProjectSettings | None,
-    base_instruction: str,
-    values: dict[str, object],
-) -> _ChapterMemoryPreparation:
-    if not body.memory_injection_enabled:
-        return _ChapterMemoryPreparation(
-            memory_pack=None,
-            memory_injection_config=None,
-            memory_retrieval_log_json=None,
-        )
-
-    memory_query_text = ""
-    query_text_source = "auto"
-    requested_query_text = str(body.memory_query_text or "").strip()
-    if requested_query_text:
-        memory_query_text = requested_query_text[:5000]
-        query_text_source = "user"
-    else:
-        memory_query_text = base_instruction
-        if chapter.plan:
-            memory_query_text = f"{memory_query_text}\n\n{chapter.plan}".strip()
-        memory_query_text = memory_query_text[:5000]
-
-    memory_modules = _resolve_memory_modules(body.memory_modules or {})
-    raw_query_text = memory_query_text
-    qp_cfg = parse_query_preprocessing_config(
-        (settings_row.query_preprocessing_json or "").strip() if settings_row is not None else None
-    )
-    memory_query_text, preprocess_obs = normalize_query_text(query_text=raw_query_text, config=qp_cfg)
-
-    pack = None
-    pack_errors = None
-    try:
-        pack = retrieve_memory_context_pack(
-            db=db,
-            project_id=project_id,
-            query_text=memory_query_text,
-            section_enabled=memory_modules,
-        )
-    except Exception:
-        pack = None
-        pack_errors = ["memory_pack_error"]
-
-    memory_pack = pack.model_dump() if pack is not None else None
-    if memory_pack is not None:
-        values["memory"] = memory_pack
-
-    memory_injection_config: dict[str, object] = {
-        "query_text": memory_query_text,
-        "query_text_source": query_text_source,
-        "modules": memory_modules,
-        "raw_query_text": raw_query_text,
-        "normalized_query_text": memory_query_text,
-        "preprocess_obs": preprocess_obs,
-    }
-    memory_retrieval_log_json = build_memory_retrieval_log_json(
-        enabled=True,
-        query_text=memory_query_text,
-        pack=pack,
-        errors=pack_errors,
-    )
-    return _ChapterMemoryPreparation(
-        memory_pack=memory_pack,
-        memory_injection_config=memory_injection_config,
-        memory_retrieval_log_json=memory_retrieval_log_json,
-    )
-
-
-def _build_memory_run_params_extra_json(
-    *,
-    style_resolution: dict[str, object],
-    memory_injection_enabled: bool,
-    memory_preparation: _ChapterMemoryPreparation,
-) -> dict[str, object]:
-    params: dict[str, object] = {
-        "style_resolution": style_resolution,
-        "memory_injection_enabled": memory_injection_enabled,
-    }
-    # Mirror generation_runs.params_json fields for observability + replay.
-    if memory_injection_enabled and memory_preparation.memory_injection_config is not None:
-        params["memory_injection_config"] = memory_preparation.memory_injection_config
-        params["memory_retrieval_log_json"] = memory_preparation.memory_retrieval_log_json
-    return params
-
-
-def _resolve_task_llm_for_call(
-    *,
-    db: Session,
-    project: Project,
-    user_id: str,
-    task_key: str,
-    x_llm_provider: str | None,
-    x_llm_api_key: str | None,
-):
-    resolved = resolve_task_llm_config(
-        db,
-        project=project,
-        user_id=user_id,
-        task_key=task_key,
-        header_api_key=x_llm_api_key,
-    )
-    if resolved is None:
-        raise AppError(code="LLM_CONFIG_ERROR", message="请先在 Prompts 页保存 LLM 配置", status_code=400)
-    if x_llm_api_key and x_llm_provider and resolved.llm_call.provider != x_llm_provider:
-        raise AppError(code="LLM_CONFIG_ERROR", message="当前任务 provider 与请求头不一致，请先保存/切换", status_code=400)
-    return resolved
-
-
 def _mark_vector_index_dirty(db: DbDep, *, project_id: str) -> None:
     row = db.get(ProjectSettings, project_id)
     if row is None:
@@ -407,84 +112,6 @@ def _mark_vector_index_dirty(db: DbDep, *, project_id: str) -> None:
         db.add(row)
         db.flush()
     row.vector_index_dirty = True
-
-
-def _find_missing_prereq_numbers(
-    db: Session,
-    *,
-    project_id: str,
-    outline_id: str,
-    chapter_number: int,
-) -> list[int]:
-    if chapter_number <= 1:
-        return []
-
-    rows = db.execute(
-        select(Chapter.number, Chapter.content_md, Chapter.summary)
-        .where(
-            Chapter.project_id == project_id,
-            Chapter.outline_id == outline_id,
-            Chapter.number < chapter_number,
-        )
-        .order_by(Chapter.number.asc())
-    ).all()
-
-    existing: dict[int, tuple[str | None, str | None]] = {int(r[0]): (r[1], r[2]) for r in rows}
-    missing: list[int] = []
-    for n in range(1, int(chapter_number)):
-        content_md, summary = existing.get(n, (None, None))
-        if not ((content_md or "").strip() or (summary or "").strip()):
-            missing.append(n)
-    return missing
-
-
-def _load_previous_chapter_context(
-    db: Session,
-    *,
-    project_id: str,
-    outline_id: str,
-    chapter_number: int,
-    previous_chapter: str | None,
-) -> tuple[str, str]:
-    mode = previous_chapter or "none"
-    if mode == "none" or chapter_number <= 1:
-        return "", ""
-
-    prev = (
-        db.execute(
-            select(Chapter).where(
-                Chapter.project_id == project_id,
-                Chapter.outline_id == outline_id,
-                Chapter.number == (chapter_number - 1),
-            )
-        )
-        .scalars()
-        .first()
-    )
-    if prev is None:
-        return "", ""
-
-    if mode == "summary":
-        return (prev.summary or "").strip(), ""
-    if mode == "content":
-        return (prev.content_md or "").strip(), ""
-    if mode == "tail":
-        raw = (prev.content_md or "").strip()
-        if not raw:
-            return "", ""
-        tail = raw[-PREVIOUS_CHAPTER_ENDING_CHARS:].lstrip()
-        return "", tail
-
-    return "", ""
-
-
-def _resolve_current_draft_tail(*, chapter: Chapter, request_tail: str | None) -> str:
-    if request_tail is not None and request_tail.strip():
-        return request_tail.strip()[-CURRENT_DRAFT_TAIL_CHARS:].lstrip()
-    raw = (chapter.content_md or "").strip()
-    if not raw:
-        return ""
-    return raw[-CURRENT_DRAFT_TAIL_CHARS:].lstrip()
 
 
 def _resolve_target_outline_id(*, db: Session, project_id: str, user_id: str, outline_id: str | None) -> str | None:
@@ -787,15 +414,7 @@ def trigger_chapter_auto_updates(
 ) -> dict:
     request_id = request.state.request_id
     chapter = require_chapter_editor(db, chapter_id=chapter_id, user_id=user_id)
-
-    token: str | None = None
-    run_id = str(body.generation_run_id or "").strip()
-    if run_id:
-        token = run_id
-    else:
-        updated_at = getattr(chapter, "updated_at", None)
-        if updated_at is not None:
-            token = updated_at.isoformat().replace("+00:00", "Z")
+    token = resolve_chapter_auto_update_token(chapter=chapter, generation_run_id=body.generation_run_id)
 
     tasks = schedule_chapter_done_tasks(
         db=db,
@@ -869,155 +488,39 @@ def plan_chapter(
     x_llm_api_key: str | None = Header(default=None, alias="X-LLM-API-Key", max_length=4096),
 ) -> dict:
     request_id = request.state.request_id
-    macro_seed = _resolve_macro_seed(request_id=request_id, body=body)
-    resolved_api_key = ""
-
-    prompt_system = ""
-    prompt_user = ""
-    prompt_render_log_json: str | None = None
-    llm_call = None
-    project_id = ""
+    prepared = None
 
     db = SessionLocal()
     try:
-        chapter = require_chapter_editor(db, chapter_id=chapter_id, user_id=user_id)
-        project_id = chapter.project_id
-        if body.context.require_sequential:
-            missing_numbers = _find_missing_prereq_numbers(
-                db,
-                project_id=project_id,
-                outline_id=chapter.outline_id,
-                chapter_number=int(chapter.number),
-            )
-            if missing_numbers:
-                raise AppError(
-                    code="CHAPTER_PREREQ_MISSING",
-                    message=f"缺少前置章节内容：第 {', '.join(str(n) for n in missing_numbers)} 章",
-                    status_code=400,
-                    details={"missing_numbers": missing_numbers},
-                )
-        project = db.get(Project, project_id)
-        if project is None:
-            raise AppError.not_found()
-
-        resolved_plan = _resolve_task_llm_for_call(
+        prepared = prepare_plan_chapter_request(
             db=db,
-            project=project,
+            chapter_id=chapter_id,
+            body=body,
             user_id=user_id,
-            task_key="plan_chapter",
+            request_id=request_id,
             x_llm_provider=x_llm_provider,
             x_llm_api_key=x_llm_api_key,
         )
-        resolved_api_key = str(resolved_plan.api_key)
-
-        ensure_default_plan_preset(db, project_id=project_id)
-
-        settings_row = db.get(ProjectSettings, project_id)
-        outline_row = db.get(Outline, chapter.outline_id)
-
-        world_setting = (settings_row.world_setting if settings_row else "") or ""
-        style_guide = (settings_row.style_guide if settings_row else "") or ""
-        constraints = (settings_row.constraints if settings_row else "") or ""
-
-        if not body.context.include_world_setting:
-            world_setting = ""
-        if not body.context.include_style_guide:
-            style_guide = ""
-        if not body.context.include_constraints:
-            constraints = ""
-
-        outline_text = (outline_row.content_md if outline_row else "") or ""
-        if not body.context.include_outline:
-            outline_text = ""
-
-        chars: list[Character] = []
-        if body.context.character_ids:
-            chars = (
-                db.execute(
-                    select(Character).where(
-                        Character.project_id == project_id,
-                        Character.id.in_(body.context.character_ids),
-                    )
-                )
-                .scalars()
-                .all()
-            )
-        characters_text = format_characters(chars)
-
-        prev_text, prev_ending = _load_previous_chapter_context(
-            db,
-            project_id=project_id,
-            outline_id=chapter.outline_id,
-            chapter_number=chapter.number,
-            previous_chapter=body.context.previous_chapter,
-        )
-
-        values: dict[str, object] = {
-            "project_name": project.name or "",
-            "genre": project.genre or "",
-            "logline": project.logline or "",
-            "world_setting": world_setting,
-            "style_guide": style_guide,
-            "constraints": constraints,
-            "characters": characters_text,
-            "outline": outline_text,
-            "chapter_number": str(chapter.number),
-            "chapter_title": (chapter.title or ""),
-            "chapter_plan": (chapter.plan or ""),
-            "instruction": body.instruction.strip(),
-            "previous_chapter": prev_text,
-            "previous_chapter_ending": prev_ending,
-        }
-        values["project"] = {
-            "name": project.name or "",
-            "genre": project.genre or "",
-            "logline": project.logline or "",
-            "world_setting": world_setting,
-            "style_guide": style_guide,
-            "constraints": constraints,
-            "characters": characters_text,
-        }
-        values["story"] = {
-            "outline": outline_text,
-            "chapter_number": int(chapter.number),
-            "chapter_title": (chapter.title or ""),
-            "chapter_plan": (chapter.plan or ""),
-            "previous_chapter": prev_text,
-            "previous_chapter_ending": prev_ending,
-        }
-        values["user"] = {"instruction": body.instruction.strip()}
-        values["context_optimizer_enabled"] = bool(getattr(settings_row, "context_optimizer_enabled", False))
-
-        prompt_system, prompt_user, prompt_messages, _, _, _, render_log = render_preset_for_task(
-            db,
-            project_id=project_id,
-            task="plan_chapter",
-            values=values,  # type: ignore[arg-type]
-            macro_seed=f"{request_id}:plan",
-            provider=resolved_plan.llm_call.provider,
-        )
-        prompt_render_log_json = json.dumps(render_log, ensure_ascii=False)
-        llm_call = resolved_plan.llm_call
     finally:
         db.close()
 
-    if llm_call is None:
+    if prepared is None:
         raise AppError(code="INTERNAL_ERROR", message="LLM 调用准备失败", status_code=500)
-    if not prompt_system.strip() and not prompt_user.strip():
+    if not prepared.prompt_system.strip() and not prepared.prompt_user.strip():
         raise AppError(code="PROMPT_CONFIG_ERROR", message="缺少 plan_chapter 提示词预设/提示块", status_code=400)
 
     plan_step = run_plan_llm_step(
         logger=logger,
         request_id=request_id,
         actor_user_id=user_id,
-        project_id=project_id,
+        project_id=prepared.project_id,
         chapter_id=chapter_id,
-        api_key=str(resolved_api_key),
-        llm_call=llm_call,
-        prompt_system=prompt_system,
-        prompt_user=prompt_user,
-        prompt_messages=prompt_messages,
-        prompt_render_log_json=prompt_render_log_json,
+        api_key=prepared.resolved_api_key,
+        llm_call=prepared.llm_call,
+        prompt_system=prepared.prompt_system,
+        prompt_user=prepared.prompt_user,
+        prompt_messages=prepared.prompt_messages,
+        prompt_render_log_json=prepared.prompt_render_log_json,
     )
 
     data = dict(plan_step.plan_out)
@@ -1044,93 +547,37 @@ def generate_chapter_precheck(
         raise AppError.validation(message="生成预检不支持 plan_first（该模式依赖 LLM 产出的 plan）")
 
     macro_seed = _resolve_macro_seed(request_id=request_id, body=body)
-
-    prompt_system = ""
-    prompt_user = ""
-    prompt_messages: list[ChatMessage] = []
-    render_log: dict | None = None
-
-    memory_pack = None
-    memory_retrieval_log_json: dict[str, object] | None = None
-    memory_injection_config: dict[str, object] | None = None
-    mcp_research: dict[str, object] | None = None
+    prepared = None
 
     db = SessionLocal()
     try:
-        chapter = require_chapter_editor(db, chapter_id=chapter_id, user_id=user_id)
-        project_id = chapter.project_id
-        project = db.get(Project, project_id)
-        if project is None:
-            raise AppError.not_found()
-
-        preset_row, _ = resolve_task_preset(db, project_id=project_id, task_key="chapter_generate")
-        if preset_row is None:
-            raise AppError(code="LLM_CONFIG_ERROR", message="请先在 Prompts 页保存 LLM 配置", status_code=400)
-        chapter_llm_call = prepare_llm_call(preset_row)
-        if x_llm_api_key and x_llm_provider and chapter_llm_call.provider != x_llm_provider:
-            raise AppError(code="LLM_CONFIG_ERROR", message="当前任务 provider 与请求头不一致，请先保存/切换", status_code=400)
-
-        values, base_instruction, _, style_resolution = build_chapter_generate_render_values(
-            db,
-            project=project,
-            chapter=chapter,
+        prepared = prepare_chapter_generate_request(
+            db=db,
+            chapter_id=chapter_id,
             body=body,
             user_id=user_id,
-        )
-        settings_row = db.get(ProjectSettings, project_id)
-        values["context_optimizer_enabled"] = bool(getattr(settings_row, "context_optimizer_enabled", False))
-        memory_preparation = _prepare_chapter_memory_injection(
-            db=db,
-            project_id=project_id,
-            chapter=chapter,
-            body=body,
-            settings_row=settings_row,
-            base_instruction=base_instruction,
-            values=values,
-        )
-        memory_pack = memory_preparation.memory_pack
-        memory_injection_config = memory_preparation.memory_injection_config
-        memory_retrieval_log_json = memory_preparation.memory_retrieval_log_json
-
-        mcp_cfg = _build_mcp_research_config(body)
-        mcp_step = run_mcp_research_step(
-            logger=logger,
             request_id=request_id,
-            actor_user_id=user_id,
-            project_id=project_id,
-            chapter_id=chapter_id,
-            config=mcp_cfg,
-        )
-        _inject_mcp_research_into_values(values=values, context_md=mcp_step.context_md)
-        if mcp_cfg.enabled or mcp_step.warnings:
-            mcp_research = _mcp_research_params(
-                cfg=mcp_cfg,
-                applied=mcp_step.applied,
-                tool_run_ids=[r.run_id for r in mcp_step.tool_runs],
-                warnings=mcp_step.warnings,
-            )
-
-        prompt_system, prompt_user, prompt_messages, _, _, _, render_log = render_preset_for_task(
-            db,
-            project_id=project_id,
-            task="chapter_generate",
-            values=values,  # type: ignore[arg-type]
-            macro_seed=macro_seed,
-            provider=chapter_llm_call.provider,
-        )
-        prompt_system, prompt_user, prompt_messages, override_applied = _apply_prompt_override(
-            prompt_system=prompt_system,
-            prompt_user=prompt_user,
-            prompt_messages=prompt_messages,
-            body=body,
+            logger=logger,
+            x_llm_provider=x_llm_provider,
+            x_llm_api_key=x_llm_api_key,
         )
     finally:
         db.close()
 
-    if render_log is None:
+    if prepared is None or prepared.chapter_prompt is None:
         raise AppError(code="INTERNAL_ERROR", message="提示词渲染失败", status_code=500)
-    if not prompt_system.strip() and not prompt_user.strip():
+    prompt_bundle = prepared.chapter_prompt
+    if not prompt_bundle.prompt_system.strip() and not prompt_bundle.prompt_user.strip():
         raise AppError(code="PROMPT_CONFIG_ERROR", message="缺少 chapter_generate 提示词预设/提示块", status_code=400)
+    prompt_overridden = False
+    mcp_research = None
+    if isinstance(prepared.run_params_extra_json, dict):
+        prompt_inspector = prepared.run_params_extra_json.get("prompt_inspector")
+        if isinstance(prompt_inspector, dict):
+            prompt_overridden = bool(prompt_inspector.get("prompt_overridden"))
+        mcp_research_raw = prepared.run_params_extra_json.get("mcp_research")
+        if isinstance(mcp_research_raw, dict):
+            mcp_research = dict(mcp_research_raw)
 
     return ok_payload(
         request_id=request_id,
@@ -1138,16 +585,16 @@ def generate_chapter_precheck(
             "precheck": {
                 "task": "chapter_generate",
                 "macro_seed": macro_seed,
-                "prompt_system": prompt_system,
-                "prompt_user": prompt_user,
-                "messages": [{"role": m.role, "content": m.content, "name": m.name} for m in prompt_messages],
-                "render_log": render_log,
-                "style_resolution": style_resolution,
-                "memory_pack": memory_pack,
-                "memory_injection_config": memory_injection_config,
-                "memory_retrieval_log_json": memory_retrieval_log_json,
+                "prompt_system": prompt_bundle.prompt_system,
+                "prompt_user": prompt_bundle.prompt_user,
+                "messages": [{"role": m.role, "content": m.content, "name": m.name} for m in prompt_bundle.prompt_messages],
+                "render_log": prompt_bundle.render_log,
+                "style_resolution": prepared.style_resolution,
+                "memory_pack": prepared.memory_pack,
+                "memory_injection_config": prepared.memory_injection_config,
+                "memory_retrieval_log_json": prepared.memory_retrieval_log_json,
                 "mcp_research": mcp_research,
-                "prompt_overridden": bool(override_applied),
+                "prompt_overridden": prompt_overridden,
             }
         },
     )
@@ -1164,10 +611,11 @@ def generate_chapter(
 ) -> dict:
     request_id = request.state.request_id
     macro_seed = _resolve_macro_seed(request_id=request_id, body=body)
-    resolved_api_key = ""
+    prepared = None
 
     prompt_system = ""
     prompt_user = ""
+    prompt_messages: list[ChatMessage] = []
     prompt_render_log_json: str | None = None
     render_values: dict[str, object] | None = None
     run_params_extra_json: dict[str, object] | None = None
@@ -1183,147 +631,49 @@ def generate_chapter(
     plan_api_key = ""
     llm_call = None
     project_id = ""
+    resolved_api_key = ""
 
     db = SessionLocal()
     try:
-        chapter = require_chapter_editor(db, chapter_id=chapter_id, user_id=user_id)
-        project_id = chapter.project_id
-        if body.context.require_sequential:
-            missing_numbers = _find_missing_prereq_numbers(
-                db,
-                project_id=project_id,
-                outline_id=chapter.outline_id,
-                chapter_number=int(chapter.number),
-            )
-            if missing_numbers:
-                raise AppError(
-                    code="CHAPTER_PREREQ_MISSING",
-                    message=f"缺少前置章节内容：第 {', '.join(str(n) for n in missing_numbers)} 章",
-                    status_code=400,
-                    details={"missing_numbers": missing_numbers},
-                )
-        project = db.get(Project, project_id)
-        if project is None:
-            raise AppError.not_found()
-
-        resolved_chapter = _resolve_task_llm_for_call(
+        prepared = prepare_chapter_generate_request(
             db=db,
-            project=project,
+            chapter_id=chapter_id,
+            body=body,
             user_id=user_id,
-            task_key="chapter_generate",
+            request_id=request_id,
+            logger=logger,
             x_llm_provider=x_llm_provider,
             x_llm_api_key=x_llm_api_key,
         )
-        resolved_api_key = str(resolved_chapter.api_key)
-        llm_call = resolved_chapter.llm_call
-
-        values, base_instruction, requirements_obj, style_resolution = build_chapter_generate_render_values(
-            db,
-            project=project,
-            chapter=chapter,
-            body=body,
-            user_id=user_id,
-        )
-        settings_row = db.get(ProjectSettings, project_id)
-        values["context_optimizer_enabled"] = bool(getattr(settings_row, "context_optimizer_enabled", False))
-        memory_preparation = _prepare_chapter_memory_injection(
-            db=db,
-            project_id=project_id,
-            chapter=chapter,
-            body=body,
-            settings_row=settings_row,
-            base_instruction=base_instruction,
-            values=values,
-        )
-        render_values = values
-        run_params_extra_json = _build_memory_run_params_extra_json(
-            style_resolution=style_resolution,
-            memory_injection_enabled=body.memory_injection_enabled,
-            memory_preparation=memory_preparation,
-        )
-
-        mcp_cfg = _build_mcp_research_config(body)
-        mcp_step = run_mcp_research_step(
-            logger=logger,
-            request_id=request_id,
-            actor_user_id=user_id,
-            project_id=project_id,
-            chapter_id=chapter_id,
-            config=mcp_cfg,
-        )
-        _inject_mcp_research_into_values(values=values, context_md=mcp_step.context_md)
-        if mcp_cfg.enabled or mcp_step.warnings:
-            run_params_extra_json = run_params_extra_json or {}
-            run_params_extra_json["mcp_research"] = _mcp_research_params(
-                cfg=mcp_cfg,
-                applied=mcp_step.applied,
-                tool_run_ids=[r.run_id for r in mcp_step.tool_runs],
-                warnings=mcp_step.warnings,
-            )
-
-        if body.plan_first:
-            resolved_plan = _resolve_task_llm_for_call(
-                db=db,
-                project=project,
-                user_id=user_id,
-                task_key="plan_chapter",
-                x_llm_provider=x_llm_provider,
-                x_llm_api_key=x_llm_api_key,
-            )
-            plan_llm_call = resolved_plan.llm_call
-            plan_api_key = str(resolved_plan.api_key)
-            ensure_default_plan_preset(db, project_id=project_id)
-            plan_values = dict(values)
-            plan_values["instruction"] = base_instruction
-            plan_values["user"] = {"instruction": base_instruction, "requirements": requirements_obj}
-            plan_prompt_system, plan_prompt_user, plan_prompt_messages, _, _, _, plan_render_log = render_preset_for_task(
-                db,
-                project_id=project_id,
-                task="plan_chapter",
-                values=plan_values,  # type: ignore[arg-type]
-                macro_seed=f"{macro_seed}:plan",
-                provider=plan_llm_call.provider,
-            )
-            plan_prompt_render_log_json = json.dumps(plan_render_log, ensure_ascii=False)
-        else:
-            prompt_system, prompt_user, prompt_messages, _, _, _, render_log = render_preset_for_task(
-                db,
-                project_id=project_id,
-                task="chapter_generate",
-                values=values,  # type: ignore[arg-type]
-                macro_seed=macro_seed,
-                provider=llm_call.provider,
-            )
-            precheck_prompt_system = prompt_system
-            precheck_prompt_user = prompt_user
-            precheck_prompt_messages = prompt_messages
-            prompt_system, prompt_user, prompt_messages, override_applied = _apply_prompt_override(
-                prompt_system=prompt_system,
-                prompt_user=prompt_user,
-                prompt_messages=prompt_messages,
-                body=body,
-            )
-            prompt_render_log_json = json.dumps(render_log, ensure_ascii=False)
-            run_params_extra_json = run_params_extra_json or {}
-            run_params_extra_json["prompt_inspector"] = _build_prompt_inspector_params(
-                macro_seed=macro_seed,
-                prompt_overridden=override_applied,
-                body=body,
-                precheck_prompt_system=precheck_prompt_system,
-                precheck_prompt_user=precheck_prompt_user,
-                precheck_prompt_messages=precheck_prompt_messages,
-                final_prompt_system=prompt_system,
-                final_prompt_user=prompt_user,
-                final_prompt_messages=prompt_messages,
-            )
-
     finally:
         db.close()
 
-    if llm_call is None:
+    if prepared is None:
         raise AppError(code="INTERNAL_ERROR", message="LLM 调用准备失败", status_code=500)
+    llm_call = prepared.llm_call
+    resolved_api_key = prepared.resolved_api_key
+    project_id = prepared.project_id
+    render_values = prepared.render_values
+    run_params_extra_json = dict(prepared.run_params_extra_json or {})
     if render_values is None:
         raise AppError(code="INTERNAL_ERROR", message="提示词变量准备失败", status_code=500)
+
+    if body.plan_first:
+        if prepared.plan_prompt is None:
+            raise AppError(code="INTERNAL_ERROR", message="规划调用准备失败", status_code=500)
+        plan_prompt_system = prepared.plan_prompt.prompt_system
+        plan_prompt_user = prepared.plan_prompt.prompt_user
+        plan_prompt_messages = prepared.plan_prompt.prompt_messages
+        plan_prompt_render_log_json = prepared.plan_prompt.prompt_render_log_json
+        plan_llm_call = prepared.plan_prompt.llm_call
+        plan_api_key = prepared.plan_prompt.api_key
+    else:
+        if prepared.chapter_prompt is None:
+            raise AppError(code="INTERNAL_ERROR", message="提示词渲染失败", status_code=500)
+        prompt_system = prepared.chapter_prompt.prompt_system
+        prompt_user = prepared.chapter_prompt.prompt_user
+        prompt_messages = prepared.chapter_prompt.prompt_messages
+        prompt_render_log_json = prepared.chapter_prompt.prompt_render_log_json
 
     if body.plan_first:
         if not plan_prompt_system.strip() and not plan_prompt_user.strip():
@@ -1354,40 +704,22 @@ def generate_chapter(
         plan_text = str((plan_out or {}).get("plan") or "").strip()
         if plan_text:
             render_values = inject_plan_into_render_values(render_values, plan_text=plan_text)
-            render_values["context_optimizer_enabled"] = bool(getattr(settings_row, "context_optimizer_enabled", False))
 
         # Render chapter prompt after plan injection.
         with SessionLocal() as db2:
-            prompt_system, prompt_user, prompt_messages, _, _, _, render_log = render_preset_for_task(
-                db2,
+            prompt_bundle, prompt_extra = render_chapter_prompt_bundle(
+                db=db2,
                 project_id=project_id,
-                task="chapter_generate",
                 values=render_values,  # type: ignore[arg-type]
                 macro_seed=macro_seed,
-                provider=llm_call.provider,
+                llm_call=llm_call,
+                body=body,
             )
-        precheck_prompt_system = prompt_system
-        precheck_prompt_user = prompt_user
-        precheck_prompt_messages = prompt_messages
-        prompt_system, prompt_user, prompt_messages, override_applied = _apply_prompt_override(
-            prompt_system=prompt_system,
-            prompt_user=prompt_user,
-            prompt_messages=prompt_messages,
-            body=body,
-        )
-        prompt_render_log_json = json.dumps(render_log, ensure_ascii=False)
-        run_params_extra_json = run_params_extra_json or {}
-        run_params_extra_json["prompt_inspector"] = _build_prompt_inspector_params(
-            macro_seed=macro_seed,
-            prompt_overridden=override_applied,
-            body=body,
-            precheck_prompt_system=precheck_prompt_system,
-            precheck_prompt_user=precheck_prompt_user,
-            precheck_prompt_messages=precheck_prompt_messages,
-            final_prompt_system=prompt_system,
-            final_prompt_user=prompt_user,
-            final_prompt_messages=prompt_messages,
-        )
+        prompt_system = prompt_bundle.prompt_system
+        prompt_user = prompt_bundle.prompt_user
+        prompt_messages = prompt_bundle.prompt_messages
+        prompt_render_log_json = prompt_bundle.prompt_render_log_json
+        run_params_extra_json = {**(run_params_extra_json or {}), **prompt_extra}
 
     if body.target_word_count is not None:
         llm_call = with_param_overrides(
@@ -1545,7 +877,7 @@ def generate_chapter_stream(
 
         prompt_system = ""
         prompt_user = ""
-        prompt_messages = []
+        prompt_messages: list[ChatMessage] = []
         prompt_render_log_json: str | None = None
         render_values: dict[str, object] | None = None
         run_params_extra_json: dict[str, object] | None = None
@@ -1564,126 +896,41 @@ def generate_chapter_stream(
         llm_call = None
         project_id = ""
         resolved_api_key = ""
+        prepared = None
 
         db = SessionLocal()
         try:
-            chapter = require_chapter_editor(db, chapter_id=chapter_id, user_id=user_id)
-            project_id = chapter.project_id
-            project = db.get(Project, project_id)
-            if project is None:
-                raise AppError.not_found()
-
-            resolved_chapter = _resolve_task_llm_for_call(
+            prepared = prepare_chapter_generate_request(
                 db=db,
-                project=project,
+                chapter_id=chapter_id,
+                body=body,
                 user_id=user_id,
-                task_key="chapter_generate",
+                request_id=request_id,
+                logger=logger,
                 x_llm_provider=x_llm_provider,
                 x_llm_api_key=x_llm_api_key,
             )
-            llm_call = resolved_chapter.llm_call
-            resolved_api_key = str(resolved_chapter.api_key)
-
-            values, base_instruction, requirements_obj, style_resolution = build_chapter_generate_render_values(
-                db,
-                project=project,
-                chapter=chapter,
-                body=body,
-                user_id=user_id,
-            )
-            settings_row = db.get(ProjectSettings, project_id)
-            values["context_optimizer_enabled"] = bool(getattr(settings_row, "context_optimizer_enabled", False))
-            memory_preparation = _prepare_chapter_memory_injection(
-                db=db,
-                project_id=project_id,
-                chapter=chapter,
-                body=body,
-                settings_row=settings_row,
-                base_instruction=base_instruction,
-                values=values,
-            )
-            render_values = values
-            run_params_extra_json = _build_memory_run_params_extra_json(
-                style_resolution=style_resolution,
-                memory_injection_enabled=body.memory_injection_enabled,
-                memory_preparation=memory_preparation,
-            )
-
-            mcp_cfg = _build_mcp_research_config(body)
-            mcp_step = run_mcp_research_step(
-                logger=logger,
-                request_id=request_id,
-                actor_user_id=user_id,
-                project_id=project_id,
-                chapter_id=chapter_id,
-                config=mcp_cfg,
-            )
-            _inject_mcp_research_into_values(values=values, context_md=mcp_step.context_md)
-            if mcp_cfg.enabled or mcp_step.warnings:
-                run_params_extra_json = run_params_extra_json or {}
-                run_params_extra_json["mcp_research"] = _mcp_research_params(
-                    cfg=mcp_cfg,
-                    applied=mcp_step.applied,
-                    tool_run_ids=[r.run_id for r in mcp_step.tool_runs],
-                    warnings=mcp_step.warnings,
-                )
-
+            project_id = prepared.project_id
+            llm_call = prepared.llm_call
+            resolved_api_key = prepared.resolved_api_key
+            render_values = prepared.render_values
+            run_params_extra_json = dict(prepared.run_params_extra_json or {})
             if body.plan_first:
-                resolved_plan = _resolve_task_llm_for_call(
-                    db=db,
-                    project=project,
-                    user_id=user_id,
-                    task_key="plan_chapter",
-                    x_llm_provider=x_llm_provider,
-                    x_llm_api_key=x_llm_api_key,
-                )
-                plan_llm_call = resolved_plan.llm_call
-                plan_api_key = str(resolved_plan.api_key)
-                ensure_default_plan_preset(db, project_id=project_id)
-                plan_values = dict(values)
-                plan_values["instruction"] = base_instruction
-                plan_values["user"] = {"instruction": base_instruction, "requirements": requirements_obj}
-                plan_prompt_system, plan_prompt_user, plan_prompt_messages, _, _, _, plan_render_log = render_preset_for_task(
-                    db,
-                    project_id=project_id,
-                    task="plan_chapter",
-                    values=plan_values,  # type: ignore[arg-type]
-                    macro_seed=f"{macro_seed}:plan",
-                    provider=plan_llm_call.provider,
-                )
-                plan_prompt_render_log_json = json.dumps(plan_render_log, ensure_ascii=False)
+                if prepared.plan_prompt is None:
+                    raise AppError(code="INTERNAL_ERROR", message="规划调用准备失败", status_code=500)
+                plan_prompt_system = prepared.plan_prompt.prompt_system
+                plan_prompt_user = prepared.plan_prompt.prompt_user
+                plan_prompt_messages = prepared.plan_prompt.prompt_messages
+                plan_prompt_render_log_json = prepared.plan_prompt.prompt_render_log_json
+                plan_llm_call = prepared.plan_prompt.llm_call
+                plan_api_key = prepared.plan_prompt.api_key
             else:
-                prompt_system, prompt_user, prompt_messages, _, _, _, render_log = render_preset_for_task(
-                    db,
-                    project_id=project_id,
-                    task="chapter_generate",
-                    values=values,  # type: ignore[arg-type]
-                    macro_seed=macro_seed,
-                    provider=llm_call.provider,
-                )
-                precheck_prompt_system = prompt_system
-                precheck_prompt_user = prompt_user
-                precheck_prompt_messages = prompt_messages
-                prompt_system, prompt_user, prompt_messages, override_applied = _apply_prompt_override(
-                    prompt_system=prompt_system,
-                    prompt_user=prompt_user,
-                    prompt_messages=prompt_messages,
-                    body=body,
-                )
-                prompt_render_log_json = json.dumps(render_log, ensure_ascii=False)
-                run_params_extra_json = run_params_extra_json or {}
-                run_params_extra_json["prompt_inspector"] = _build_prompt_inspector_params(
-                    macro_seed=macro_seed,
-                    prompt_overridden=override_applied,
-                    body=body,
-                    precheck_prompt_system=precheck_prompt_system,
-                    precheck_prompt_user=precheck_prompt_user,
-                    precheck_prompt_messages=precheck_prompt_messages,
-                    final_prompt_system=prompt_system,
-                    final_prompt_user=prompt_user,
-                    final_prompt_messages=prompt_messages,
-                )
-
+                if prepared.chapter_prompt is None:
+                    raise AppError(code="INTERNAL_ERROR", message="提示词渲染失败", status_code=500)
+                prompt_system = prepared.chapter_prompt.prompt_system
+                prompt_user = prepared.chapter_prompt.prompt_user
+                prompt_messages = prepared.chapter_prompt.prompt_messages
+                prompt_render_log_json = prepared.chapter_prompt.prompt_render_log_json
             run_params_json = build_run_params_json(
                 params_json=llm_call.params_json,
                 memory_retrieval_log_json=None,
@@ -1763,37 +1010,19 @@ def generate_chapter_stream(
 
                 yield sse_progress(message="渲染章节提示词...", progress=8)
                 with SessionLocal() as db2:
-                    prompt_system, prompt_user, prompt_messages, _, _, _, render_log = render_preset_for_task(
-                        db2,
+                    prompt_bundle, prompt_extra = render_chapter_prompt_bundle(
+                        db=db2,
                         project_id=project_id,
-                        task="chapter_generate",
                         values=render_values,  # type: ignore[arg-type]
                         macro_seed=macro_seed,
-                        provider=llm_call.provider,
+                        llm_call=llm_call,
+                        body=body,
                     )
-
-                precheck_prompt_system = prompt_system
-                precheck_prompt_user = prompt_user
-                precheck_prompt_messages = prompt_messages
-                prompt_system, prompt_user, prompt_messages, override_applied = _apply_prompt_override(
-                    prompt_system=prompt_system,
-                    prompt_user=prompt_user,
-                    prompt_messages=prompt_messages,
-                    body=body,
-                )
-                prompt_render_log_json = json.dumps(render_log, ensure_ascii=False)
-                run_params_extra_json = run_params_extra_json or {}
-                run_params_extra_json["prompt_inspector"] = _build_prompt_inspector_params(
-                    macro_seed=macro_seed,
-                    prompt_overridden=override_applied,
-                    body=body,
-                    precheck_prompt_system=precheck_prompt_system,
-                    precheck_prompt_user=precheck_prompt_user,
-                    precheck_prompt_messages=precheck_prompt_messages,
-                    final_prompt_system=prompt_system,
-                    final_prompt_user=prompt_user,
-                    final_prompt_messages=prompt_messages,
-                )
+                prompt_system = prompt_bundle.prompt_system
+                prompt_user = prompt_bundle.prompt_user
+                prompt_messages = prompt_bundle.prompt_messages
+                prompt_render_log_json = prompt_bundle.prompt_render_log_json
+                run_params_extra_json = {**(run_params_extra_json or {}), **prompt_extra}
                 run_params_json = build_run_params_json(
                     params_json=llm_call.params_json,
                     memory_retrieval_log_json=None,

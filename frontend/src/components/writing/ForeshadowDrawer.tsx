@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { buildProjectReviewPath, buildProjectWritePath } from "../../lib/projectRoutes";
 import { UI_COPY } from "../../lib/uiCopy";
 import { ApiError, apiJson } from "../../services/apiClient";
 import { Drawer } from "../ui/Drawer";
@@ -128,7 +129,7 @@ export function ForeshadowDrawer(props: {
             {hasMore ? copy.hasMoreTag : ""}
             {requestId ? (
               <span className="ml-2">
-                {copy.requestIdPrefix} {requestId}
+                定位编号: {requestId}
               </span>
             ) : null}
           </div>
@@ -171,15 +172,17 @@ export function ForeshadowDrawer(props: {
                   <div className="min-w-0">
                     <div className="truncate text-sm font-medium text-ink">{it.title || copy.noTitle}</div>
                     <div className="mt-1 text-[11px] text-subtext">
-                      {copy.metaChapterId}:{it.chapter_id || "-"} | {copy.metaScore}:{String(it.importance_score ?? 0)}{" "}
-                      | {copy.metaTimeline}:{String(it.story_timeline ?? 0)}
+                      {copy.metaChapterId}: {it.chapter_id || "-"} | {copy.metaScore}: {String(it.importance_score ?? 0)}{" "}
+                      | {copy.metaTimeline}: {String(it.story_timeline ?? 0)}
                     </div>
                   </div>
                   <div className="flex shrink-0 flex-wrap gap-2">
                     <button
                       className="btn btn-secondary"
                       disabled={!it.chapter_id}
-                      onClick={() => navigate(`/projects/${props.projectId}/writing?chapterId=${it.chapter_id}`)}
+                      onClick={() =>
+                        navigate(`${buildProjectWritePath(props.projectId!)}?chapterId=${encodeURIComponent(it.chapter_id!)}`)
+                      }
                       type="button"
                     >
                       {copy.jumpChapter}
@@ -188,7 +191,9 @@ export function ForeshadowDrawer(props: {
                       className="btn btn-secondary"
                       disabled={!it.chapter_id}
                       onClick={() =>
-                        navigate(`/projects/${props.projectId}/chapter-analysis?chapterId=${it.chapter_id}`)
+                        navigate(
+                          `${buildProjectReviewPath(props.projectId!, "analysis")}?chapterId=${encodeURIComponent(it.chapter_id!)}`,
+                        )
                       }
                       type="button"
                     >

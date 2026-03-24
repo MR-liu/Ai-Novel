@@ -1,4 +1,5 @@
 import { WizardNextBar } from "../components/atelier/WizardNextBar";
+import { FeedbackStateCard } from "../components/ui/Feedback";
 import { UnsavedChangesGuard } from "../hooks/useUnsavedChangesGuard";
 import { copyText } from "../lib/copyText";
 
@@ -86,27 +87,30 @@ function SettingsPageSkeleton() {
 function SettingsPageErrorState(props: { message: string; code: string; requestId?: string; onRetry: () => void }) {
   return (
     <div className="grid gap-6 pb-24">
-      <div className="error-card">
-        <div className="state-title">加载失败</div>
-        <div className="state-desc">{`${props.message} (${props.code})`}</div>
-        {props.requestId ? (
-          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-subtext">
-            <span>request_id: {props.requestId}</span>
-            <button
-              className="btn btn-secondary btn-sm"
-              onClick={() => void copyText(props.requestId!, { title: "复制 request_id" })}
-              type="button"
-            >
-              复制 request_id
-            </button>
-          </div>
-        ) : null}
-        <div className="mt-4 flex flex-wrap gap-2">
+      <FeedbackStateCard
+        tone="danger"
+        title="加载失败"
+        description={`${props.message} (${props.code})`}
+        meta={
+          props.requestId ? (
+            <>
+              <span>request_id: {props.requestId}</span>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => void copyText(props.requestId!, { title: "复制 request_id" })}
+                type="button"
+              >
+                复制 request_id
+              </button>
+            </>
+          ) : null
+        }
+        actions={
           <button className="btn btn-primary" onClick={props.onRetry} type="button">
             重试
           </button>
-        </div>
-      </div>
+        }
+      />
     </div>
   );
 }

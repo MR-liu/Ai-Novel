@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ApiError } from "../../services/apiClient";
-import { formatLlmTestApiError } from "./llmApiError";
+import { formatLlmModelListError, formatLlmTestApiError } from "./llmApiError";
 
 describe("prompts/llmApiError", () => {
   it("explains missing key errors with the saved-key contract", () => {
@@ -11,7 +11,7 @@ describe("prompts/llmApiError", () => {
       requestId: "req-1",
       status: 400,
     });
-    expect(formatLlmTestApiError(err)).toBe("请先保存 API Key");
+    expect(formatLlmTestApiError(err)).toBe("这份连接档案还没有保存访问密钥，先保存后再做连接检查");
   });
 
   it("extracts upstream bad-request detail and compat adjustments", () => {
@@ -30,7 +30,7 @@ describe("prompts/llmApiError", () => {
       },
     });
     expect(formatLlmTestApiError(err)).toBe(
-      "请求参数有误，可能是模型名称或参数不支持（上游：unsupported response_format）（兼容：lowered max_tokens、removed top_p）",
+      "这次连接检查没有发出去，通常是模型名、参数或兼容设置还不合适（服务返回：unsupported response_format）（已自动调整：lowered max_tokens、removed top_p）",
     );
   });
 
@@ -44,6 +44,16 @@ describe("prompts/llmApiError", () => {
         status_code: 503,
       },
     });
-    expect(formatLlmTestApiError(err)).toBe("服务暂时不可用，请稍后重试（503）");
+    expect(formatLlmTestApiError(err)).toBe("模型服务暂时不可用，稍后再试即可（503）");
+  });
+
+  it("formats model list refresh failures with author-facing language", () => {
+    const err = new ApiError({
+      code: "LLM_TIMEOUT",
+      message: "timeout",
+      requestId: "req-4",
+      status: 504,
+    });
+    expect(formatLlmModelListError(err)).toBe("模型服务响应较慢，暂时没拿到候选模型");
   });
 });

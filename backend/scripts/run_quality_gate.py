@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = BACKEND_ROOT.parent
 PYTHON = sys.executable
 
 
@@ -16,9 +17,10 @@ def run_step(*args: str) -> None:
 
 
 def main() -> int:
-    run_step("-m", "compileall", "-q", "app", "alembic", "tests", "scripts", "..\\scripts\\guards")
-    run_step("-m", "ruff", "check", "app", "tests", "scripts", "..\\scripts\\guards")
-    run_step("..\\scripts\\guards\\run.py")
+    guard_dir = REPO_ROOT / "scripts" / "guards"
+    run_step("-m", "compileall", "-q", "app", "alembic", "tests", "scripts", str(guard_dir))
+    run_step("-m", "ruff", "check", "app", "tests", "scripts", str(guard_dir))
+    run_step(str(guard_dir / "run.py"))
     return 0
 
 

@@ -1,4 +1,5 @@
 import { UI_COPY } from "../../lib/uiCopy";
+import { FeedbackCallout, FeedbackDisclosure } from "../../components/ui/Feedback";
 
 import { SETTINGS_COPY } from "./settingsCopy";
 
@@ -10,8 +11,8 @@ type SettingsFeatureDefaultsSectionProps = {
 
 export function SettingsFeatureDefaultsSection(props: SettingsFeatureDefaultsSectionProps) {
   return (
-    <details className="panel" aria-label={UI_COPY.featureDefaults.ariaLabel}>
-      <summary className="ui-focus-ring ui-transition-fast cursor-pointer select-none p-6">
+    <section className="panel p-6" aria-label={UI_COPY.featureDefaults.ariaLabel} role="region">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="grid gap-1">
           <div className="font-content text-xl text-ink">{UI_COPY.featureDefaults.title}</div>
           <div className="text-xs text-subtext">{UI_COPY.featureDefaults.subtitle}</div>
@@ -19,10 +20,23 @@ export function SettingsFeatureDefaultsSection(props: SettingsFeatureDefaultsSec
             {SETTINGS_COPY.featureDefaults.status(props.writingMemoryInjectionEnabled)}
           </div>
         </div>
-      </summary>
+        <span className="manuscript-chip">{props.writingMemoryInjectionEnabled ? "默认开启注入" : "默认关闭注入"}</span>
+      </div>
 
-      <div className="px-6 pb-6 pt-0">
-        <div className="mt-4 grid gap-2">
+      <FeedbackDisclosure
+        className="mt-4 rounded-atelier border border-border bg-canvas p-4"
+        summaryClassName="px-0 py-0"
+        bodyClassName="pt-4"
+        title={
+          <div className="grid gap-1">
+            <div className="text-sm text-ink">展开默认开关设置</div>
+            <div className="text-xs text-subtext">
+              这里定义的是新章节进入写作时的默认状态，用来减少重复操作，不会覆盖你在单章里的临时判断。
+            </div>
+          </div>
+        }
+      >
+        <div className="grid gap-2">
           <label className="flex items-center gap-2 text-sm text-ink">
             <input
               className="checkbox"
@@ -48,11 +62,11 @@ export function SettingsFeatureDefaultsSection(props: SettingsFeatureDefaultsSec
             <div className="text-[11px] text-subtext">{UI_COPY.featureDefaults.resetHint}</div>
           </div>
 
-          <div className="mt-3 rounded-atelier border border-border bg-canvas p-3 text-[11px] text-subtext">
+          <FeedbackCallout className="mt-3 text-xs" title="默认值不会阻断写作">
             {UI_COPY.featureDefaults.autoUpdateHint}
-          </div>
+          </FeedbackCallout>
         </div>
-      </div>
-    </details>
+      </FeedbackDisclosure>
+    </section>
   );
 }

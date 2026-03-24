@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
-import { DebugDetails, DebugPageShell } from "../components/atelier/DebugPageShell";
+import { ToolContent } from "../components/layout/AppShell";
+import { EditorialHero } from "../components/layout/AuthorPageScaffold";
+import { FeedbackCallout, FeedbackDisclosure, FeedbackEmptyState, FeedbackStateCard } from "../components/ui/Feedback";
 import { TablesPanelInline } from "../components/writing/TablesPanel";
 import { useToast } from "../components/ui/toast";
 import { copyText } from "../lib/copyText";
+import { buildStudioSystemPath } from "../lib/projectRoutes";
 import { UI_COPY } from "../lib/uiCopy";
 import { ApiError, apiJson } from "../services/apiClient";
 
@@ -32,6 +35,8 @@ export function NumericTablesPage() {
   const [lastTaskId, setLastTaskId] = useState<string>("");
 
   const selectedTable = useMemo(() => tables.find((t) => t.id === selectedTableId) ?? null, [selectedTableId, tables]);
+  const currentTableLabel = selectedTable ? `${selectedTable.name}（${selectedTable.table_key}）` : "尚未选择表格";
+  const currentFocusLabel = focus.trim() || "未设置更新重点";
 
   const loadTables = useCallback(async () => {
     if (!pid) return;
@@ -50,7 +55,7 @@ export function NumericTablesPage() {
         e instanceof ApiError
           ? e
           : new ApiError({ code: "UNKNOWN", message: String(e), requestId: "unknown", status: 0 });
-      setTablesError(`${err.message} (${err.code})${err.requestId ? ` request_id:${err.requestId}` : ""}`);
+      setTablesError(`${err.message} (${err.code})${err.requestId ? ` 请求 ID（request_id）:${err.requestId}` : ""}`);
     } finally {
       setTablesLoading(false);
     }
@@ -91,27 +96,67 @@ export function NumericTablesPage() {
     }
   }, [focus, pid, selectedTableId, toast]);
 
-  if (!pid) return <div className="text-subtext">缺少 projectId</div>;
+  if (!pid)
+    return (
+      <ToolContent>
+        <FeedbackStateCard
+          tone="danger"
+          kicker="表格资料"
+          title="当前无法打开表格资料"
+          description="缺少 `projectId`，请从具体项目进入后再查看和维护结构化资料。"
+        />
+      </ToolContent>
+    );
 
   return (
-    <DebugPageShell
-      title={UI_COPY.nav.numericTables}
-      description="数值表格（NumericTables）：用于记录可数字化状态（例如金钱/时间/等级/资源）；与图谱底座数据（StructuredMemory）不同。"
-    >
-      <DebugDetails title="说明">
-        <div className="grid gap-1 text-xs text-subtext">
-          <div>
-            本页为「数值表格（NumericTables）」的 AdvancedDebug：用表格记录钱/时间/等级/资源；不是图谱底座数据。
-          </div>
-          <div>支持直接编辑表与行（project_tables / project_table_rows）。</div>
-        </div>
-      </DebugDetails>
+    <ToolContent className="grid gap-4">
+      <EditorialHero
+        kicker="表格资料"
+        title={UI_COPY.nav.numericTables}
+        subtitle="把金钱、时间、等级、库存、组织状态等适合结构化维护的信息集中放在这里。它服务于作者资料管理，不是后台系统页。"
+        items={[
+          { key: "selected", label: "当前选中", value: currentTableLabel },
+          { key: "focus", label: "更新重点", value: currentFocusLabel },
+          { key: "task", label: "最近任务", value: lastTaskId || "还没有创建更新任务" },
+        ]}
+      />
 
-      <DebugDetails title="AI 更新（table_ai_update）">
-        <div className="grid gap-3">
-          <div className="grid gap-1 text-xs text-subtext">
-            <div>点击后会创建一个 ProjectTask（可在 Task Center 查看结果、失败可重试）。</div>
-            <div>任务成功后会产出一个 ChangeSet（可 apply / rollback）。</div>
+      <section className="manuscript-status-band">
+        <div className="flex flex-wrap items-center gap-2">
+          {lastTaskId ? (
+            <Link
+              className="btn btn-secondary"
+              to={`${buildStudioSystemPath(pid, "tasks")}?project_task_id=${encodeURIComponent(lastTaskId)}`}
+            >
+              查看最近任务
+            </Link>
+          ) : (
+            <Link className="btn btn-secondary" to={buildStudioSystemPath(pid, "tasks")}>
+              打开任务中心
+            </Link>
+          )}
+          <button className="btn btn-secondary" onClick={() => void loadTables()} type="button">
+            刷新表列表
+          </button>
+        </div>
+
+        <div className="manuscript-status-list">
+          <span className="manuscript-chip">{tables.length} 张表</span>
+          <span className="manuscript-chip">{selectedTable ? `已选：${selectedTable.name}` : "等待选择表格"}</span>
+          <span className="manuscript-chip">{lastTaskId ? "可回到任务中心追踪结果" : "尚未创建任务"}</span>
+        </div>
+      </section>
+
+      <FeedbackDisclosure
+        className="studio-header-panel"
+        summaryClassName="text-sm text-subtext hover:text-ink"
+        bodyClassName="pt-3"
+        title="AI 辅助更新"
+      >
+        <div className="mt-3 grid gap-3">
+          <div className="grid gap-1 text-sm text-subtext">
+            <div>点击后会创建一个后台任务，你可以在任务中心查看结果、失败重试和后续变更。</div>
+            <div>任务成功后只会产出待采纳的变更建议，不会让 AI 直接改写表格资料。</div>
           </div>
 
           <div className="grid gap-2 lg:grid-cols-[1fr,2fr]">
@@ -134,16 +179,23 @@ export function NumericTablesPage() {
                   </option>
                 ))}
               </select>
-              {tablesError ? <div className="text-xs text-danger">{tablesError}</div> : null}
-              <div className="flex flex-wrap items-center gap-2">
-                <button className="btn btn-secondary btn-sm" onClick={() => void loadTables()} type="button">
-                  刷新表列表
-                </button>
-              </div>
+              {tablesError ? (
+                <FeedbackCallout className="mt-2" tone="danger" title="表格列表加载失败">
+                  {tablesError}
+                </FeedbackCallout>
+              ) : null}
+              {!tablesLoading && !tablesError && tables.length === 0 ? (
+                <FeedbackEmptyState
+                  className="mt-2"
+                  variant="compact"
+                  title="还没有可更新的表格"
+                  description="先在下方创建一张表，再回来用 AI 辅助补充或校对结构化资料。"
+                />
+              ) : null}
             </label>
 
             <label className="grid gap-1">
-              <div className="text-xs text-subtext">Focus（可选）</div>
+              <div className="text-xs text-subtext">更新重点（可选）</div>
               <textarea
                 className="textarea min-h-[88px]"
                 id="numeric_tables_ai_focus"
@@ -151,7 +203,7 @@ export function NumericTablesPage() {
                 value={focus}
                 onChange={(e) => setFocus(e.target.value)}
                 placeholder="例如：根据最新章节更新金币与装备数量；不要捏造"
-                aria-label="AI 更新 focus (numeric_tables_ai_focus)"
+                aria-label="AI 更新重点 (numeric_tables_ai_focus)"
               />
             </label>
           </div>
@@ -164,35 +216,31 @@ export function NumericTablesPage() {
               aria-label="创建 AI 更新任务 (numeric_tables_ai_schedule)"
               type="button"
             >
-              {scheduling ? "创建中..." : `AI 提议更新${selectedTable ? `：${selectedTable.name}` : ""}`}
+              {scheduling ? "创建中..." : `创建资料更新任务${selectedTable ? `：${selectedTable.name}` : ""}`}
             </button>
 
             {lastTaskId ? (
               <>
                 <Link
                   className="btn btn-secondary"
-                  to={`/projects/${pid}/tasks?project_task_id=${encodeURIComponent(lastTaskId)}`}
+                  to={`${buildStudioSystemPath(pid, "tasks")}?project_task_id=${encodeURIComponent(lastTaskId)}`}
                 >
-                  打开 Task Center（定位本次任务）
+                  打开任务中心（定位本次任务）
                 </Link>
                 <button
                   className="btn btn-secondary"
-                  onClick={() => void copyText(lastTaskId, { title: "复制失败：请手动复制 task_id" })}
+                  onClick={() => void copyText(lastTaskId, { title: "复制失败：请手动复制任务 ID（task_id）" })}
                   type="button"
                 >
-                  复制 task_id
+                  复制任务 ID
                 </button>
               </>
-            ) : (
-              <Link className="btn btn-secondary" to={`/projects/${pid}/tasks`}>
-                打开 Task Center
-              </Link>
-            )}
+            ) : null}
           </div>
         </div>
-      </DebugDetails>
+      </FeedbackDisclosure>
 
       <TablesPanelInline projectId={pid} />
-    </DebugPageShell>
+    </ToolContent>
   );
 }

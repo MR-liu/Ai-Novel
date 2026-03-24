@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
+import { Badge } from "../../components/ui/Badge";
+import { FeedbackCallout, FeedbackDisclosure, FeedbackEmptyState } from "../../components/ui/Feedback";
 import { useToast } from "../../components/ui/toast";
+import { buildProjectWritePath, buildStudioResearchPath, buildStudioSystemPath } from "../../lib/projectRoutes";
 import { ApiError, apiJson } from "../../services/apiClient";
 
 type EntityRow = {
@@ -77,6 +80,27 @@ function safeRandomUUID(): string {
     return v.toString(16);
   });
 }
+
+function summarizeEvidenceSources(evidence: EvidenceRow[]): string {
+  if (!evidence.length) return "暂无";
+  const counts = new Map<string, number>();
+  for (const item of evidence) {
+    const key = String(item.source_type || "unknown");
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([key, value]) => `${key}:${value}`)
+    .join(" | ");
+}
+
+function compactQuotePreview(text: string | null | undefined, limit = 72): string {
+  const normalized = String(text || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return "（空）";
+  return normalized.length > limit ? `${normalized.slice(0, limit)}…` : normalized;
+}
+
 export function CharacterRelationsView(props: {
   projectId: string;
   chapterId?: string;
@@ -105,6 +129,14 @@ export function CharacterRelationsView(props: {
     for (const c of characters) map.set(String(c.id), String(c.name || ""));
     return map;
   }, [characters]);
+  const activeRelationCount = useMemo(
+    () => relations.filter((relation) => !relation.deleted_at).length,
+    [relations],
+  );
+  const deletedRelationCount = useMemo(
+    () => relations.filter((relation) => Boolean(relation.deleted_at)).length,
+    [relations],
+  );
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -178,7 +210,7 @@ export function CharacterRelationsView(props: {
   const runChangeSet = useCallback(
     async (opts: { title: string; ops: unknown[] }) => {
       if (!chapterId) {
-        toast.toastWarning("缺少 chapterId：请从写作页带上 ?chapterId=... 打开，以便写入变更集。");
+        toast.toastWarning("当前缺少章节上下文。请从写作页进入当前章节后，再回来写入关系变更。");
         return;
       }
       setSaving(true);
@@ -202,8 +234,8 @@ export function CharacterRelationsView(props: {
         onRequestId(applyRes.request_id ?? null);
 
         const warnings = applyRes.data?.warnings ?? [];
-        if (warnings.length) toast.toastWarning(`已应用，但有 ${warnings.length} 条 warning`, applyRes.request_id);
-        else toast.toastSuccess("已应用变更集", applyRes.request_id);
+        if (warnings.length) toast.toastWarning(`已应用，但还有 ${warnings.length} 条提醒`, applyRes.request_id);
+        else toast.toastSuccess("已应用关系变更", applyRes.request_id);
 
         setLastChangeSetId(String(changeSetId));
         setEvidenceByRelationId({});
@@ -254,7 +286,7 @@ export function CharacterRelationsView(props: {
     const fromId = createFromId.trim();
     const toId = createToId.trim();
     if (!fromId || !toId) {
-      toast.toastWarning("请选择 from/to 人物");
+      toast.toastWarning("请先选定关系两端的人物");
       return;
     }
     const relType = (createType || "related_to").trim() || "related_to";
@@ -377,70 +409,125 @@ export function CharacterRelationsView(props: {
 
   return (
     <div className="grid gap-3">
-      <div className="rounded-atelier border border-border bg-canvas p-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="text-sm text-ink">人物关系（entity_type=character）</div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              className="btn btn-secondary btn-sm"
-              onClick={() => void refresh()}
-              disabled={loading}
-              type="button"
-            >
-              {loading ? "刷新..." : "刷新"}
-            </button>
-            <Link
-              className="btn btn-secondary btn-sm"
-              to={`/projects/${projectId}/graph`}
-              aria-label="structured_character_relations_open_graph"
-            >
-              去图谱 Query
-            </Link>
-          </div>
-        </div>
-        <div className="mt-1 text-xs text-subtext">
-          提示：该视图会过滤出人物实体，并提供关系 CRUD；写入将走 Memory Update 变更集（需要 ?chapterId）。
-        </div>
-        {lastChangeSetId ? (
-          <div className="mt-2 rounded-atelier border border-border bg-surface p-2 text-xs">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="text-subtext">
-                最近变更集：<span className="font-mono text-ink">{lastChangeSetId}</span>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <Link className="btn btn-secondary btn-sm" to={`/projects/${projectId}/tasks`}>
-                  打开 Task Center
-                </Link>
-                <button
-                  className="btn btn-secondary btn-sm"
-                  onClick={() => void rollbackLastChangeSet()}
-                  aria-label="structured_character_relations_rollback_last"
-                  disabled={saving || rollingBack}
-                  type="button"
-                >
-                  {rollingBack ? "回滚中..." : "回滚最近变更集"}
-                </button>
-              </div>
+      <section className="research-guide-panel">
+        <div className="studio-cluster-header">
+          <div>
+            <div className="studio-cluster-title">关系概览与写入状态</div>
+            <div className="studio-cluster-copy">
+              先确认当前人物关系数量、是否带着章节上下文打开，以及最近一次关系改动能不能继续回滚。
             </div>
           </div>
-        ) : null}
-        {!chapterId ? (
-          <div className="mt-2 rounded-atelier border border-border bg-surface p-2 text-xs text-amber-700 dark:text-amber-300">
-            缺少 chapterId：创建/编辑/删除会被禁用。建议从写作页进入，或手动在 URL 加上 ?chapterId=...。
-          </div>
-        ) : null}
-        {error ? (
-          <div className="mt-2 rounded-atelier border border-border bg-surface p-2 text-xs text-subtext">
-            {error.message} ({error.code}) {error.requestId ? `| request_id: ${error.requestId}` : ""}
-          </div>
-        ) : null}
-      </div>
+          <div className="studio-cluster-meta">{loading ? "刷新中" : `${relations.length} 条关系`}</div>
+        </div>
 
-      <div className="rounded-atelier border border-border bg-canvas p-3">
-        <div className="text-sm text-ink">新增关系</div>
-        <div className="mt-2 grid gap-3 lg:grid-cols-4">
+        <div className="studio-overview-grid lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+          <div className="studio-overview-card is-emphasis">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="studio-overview-label">当前关系范围</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => void refresh()}
+                  disabled={loading}
+                  type="button"
+                >
+                  {loading ? "刷新..." : "刷新"}
+                </button>
+                <Link
+                  className="btn btn-secondary btn-sm"
+                  to={buildStudioResearchPath(projectId, "graph")}
+                  aria-label="structured_character_relations_open_graph"
+                >
+                  去图谱页
+                </Link>
+              </div>
+            </div>
+            <div className="studio-overview-value">人物 {characters.length} · 有效关系 {activeRelationCount}</div>
+            <div className="studio-overview-copy">
+              这里只展示人物与人物之间的关系，适合把图谱命中结果落到人物关系层，再继续补证据、回滚或微调。
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-subtext">
+              <span className="rounded-full border border-border px-2 py-1 text-ink">人物 {characters.length}</span>
+              <span className="rounded-full border border-border px-2 py-1 text-ink">有效关系 {activeRelationCount}</span>
+              {includeDeleted ? (
+                <span className="rounded-full border border-border px-2 py-1 text-ink">含已删除 {deletedRelationCount}</span>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="studio-overview-card">
+            <div className="studio-overview-label">写入与回滚</div>
+            <div className="studio-overview-value">{chapterId ? "当前可直接写入关系变更" : "当前缺少章节上下文"}</div>
+            {!chapterId ? (
+              <FeedbackCallout className="mt-2 text-xs" tone="warning" title="当前缺少章节上下文">
+                当前没有绑定章节，所以创建、编辑、删除都会被禁用。建议从{" "}
+                <Link className="underline" to={buildProjectWritePath(projectId)}>
+                  写作页
+                </Link>{" "}
+                进入当前章节后再返回这里。
+              </FeedbackCallout>
+            ) : (
+              <FeedbackCallout className="mt-2 text-xs" title="当前可以直接写入关系变更">
+                当前已绑定章节，可以直接把人物关系修改写入连续性更新变更集。
+              </FeedbackCallout>
+            )}
+            {lastChangeSetId ? (
+              <div className="mt-3 rounded-atelier border border-border bg-surface p-3 text-xs">
+                <div className="text-subtext">
+                  最近变更集：<span className="font-mono text-ink">{lastChangeSetId}</span>
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <Link className="btn btn-secondary btn-sm" to={buildStudioSystemPath(projectId, "tasks")}>
+                    打开任务中心
+                  </Link>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => void rollbackLastChangeSet()}
+                    aria-label="structured_character_relations_rollback_last"
+                    disabled={saving || rollingBack}
+                    type="button"
+                  >
+                    {rollingBack ? "回滚中..." : "回滚最近变更集"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <FeedbackEmptyState
+                className="mt-3"
+                variant="compact"
+                title="本次会话还没有新的关系变更集"
+                description="当你创建、编辑或删除人物关系后，这里会显示最近一次可回滚的变更集。"
+              />
+            )}
+            {error ? (
+              <FeedbackCallout className="mt-3 text-xs" tone="danger" title="人物关系加载失败">
+                {error.message} ({error.code}) {error.requestId ? `| 定位编号: ${error.requestId}` : ""}
+              </FeedbackCallout>
+            ) : null}
+          </div>
+        </div>
+      </section>
+
+      <section className="panel p-4">
+        <div className="studio-cluster-header">
+          <div>
+            <div className="studio-cluster-title">新增关系</div>
+            <div className="studio-cluster-copy">
+              先选定人物对，再补关系类型和一句描述。推荐先写稳定的角色关系，避免把瞬时情绪写成长期关系。
+            </div>
+          </div>
+          <div className="studio-cluster-meta">{chapterId ? "可直接写入" : "需先进入章节"}</div>
+        </div>
+        {characters.length === 0 ? (
+          <FeedbackEmptyState
+            className="mt-4 rounded-atelier border border-border bg-canvas p-3"
+            title="还没有可用的人物实体"
+            description="可以先回到正文、世界书或图谱抽取链路，让角色进入底层实体后再维护人物关系。"
+          />
+        ) : null}
+        <div className="mt-4 grid gap-3 lg:grid-cols-4">
           <label className="grid gap-1">
-            <span className="text-xs text-subtext">From</span>
+            <span className="text-xs text-subtext">关系起点</span>
             <select
               className="select"
               id="structured_character_relations_create_from"
@@ -460,7 +547,7 @@ export function CharacterRelationsView(props: {
           </label>
 
           <label className="grid gap-1">
-            <span className="text-xs text-subtext">关系类型（relation_type）</span>
+            <span className="text-xs text-subtext">关系类型</span>
             <input
               className="input"
               value={createType}
@@ -472,7 +559,7 @@ export function CharacterRelationsView(props: {
           </label>
 
           <label className="grid gap-1">
-            <span className="text-xs text-subtext">To</span>
+            <span className="text-xs text-subtext">关系终点</span>
             <select
               className="select"
               id="structured_character_relations_create_to"
@@ -499,7 +586,7 @@ export function CharacterRelationsView(props: {
               disabled={!chapterId || saving}
               type="button"
             >
-              {saving ? "提交中..." : "新增"}
+              {saving ? "写入中..." : "新增关系"}
             </button>
           </div>
         </div>
@@ -509,7 +596,7 @@ export function CharacterRelationsView(props: {
           ))}
         </datalist>
         <label className="mt-3 grid gap-1">
-          <span className="text-xs text-subtext">描述（description_md，可选）</span>
+          <span className="text-xs text-subtext">补充描述（可选）</span>
           <textarea
             className="textarea"
             rows={2}
@@ -519,43 +606,75 @@ export function CharacterRelationsView(props: {
             disabled={!chapterId || saving}
           />
         </label>
-      </div>
+      </section>
 
-      <div className="rounded-atelier border border-border bg-canvas p-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="text-sm text-ink">
-            关系列表 <span className="text-xs text-subtext">({relations.length})</span>
+      <section className="panel p-4">
+        <div className="studio-cluster-header">
+          <div>
+            <div className="studio-cluster-title">关系列表与证据</div>
+            <div className="studio-cluster-copy">
+              先浏览当前关系列表，再决定是直接编辑、删除，还是展开证据看看这条关系是否有足够依据。
+            </div>
           </div>
-          <div className="text-xs text-subtext">
-            人物：{characters.length} | include_deleted: {includeDeleted ? "true" : "false"}
+          <div className="studio-cluster-meta">
+            人物 {characters.length} · {includeDeleted ? "包含已删除关系" : "仅看有效关系"}
           </div>
         </div>
-        {!relations.length && !loading ? <div className="mt-2 text-sm text-subtext">暂无人物关系</div> : null}
-        <div className="mt-2 grid gap-2">
+        {!relations.length && !loading ? (
+          <FeedbackEmptyState
+            className="mt-4 rounded-atelier border border-border bg-canvas p-3"
+            title="还没有人物关系"
+            description="可以先新增一条基础关系，或回到图谱页看看是否已经抽出了可用的关系线索。"
+          />
+        ) : null}
+        <div className="mt-4 grid gap-2">
           {relations.map((r) => {
             const relId = String(r.id);
             const fromName = characterIdToName.get(String(r.from_entity_id)) || String(r.from_entity_id);
             const toName = characterIdToName.get(String(r.to_entity_id)) || String(r.to_entity_id);
             const relType = String(r.relation_type || "related_to");
             const isEditing = relId === String(editingId || "");
+            const isFocused = relId === String(focusRelationId || "");
             const open = !!evidenceOpen[relId];
             const evLoading = !!evidenceLoading[relId];
             const ev = evidenceByRelationId[relId] ?? null;
+            const evidenceSourceSummary = ev?.length ? summarizeEvidenceSources(ev) : "等待加载";
+            const latestEvidenceAt =
+              ev?.length && ev.some((item) => Boolean(item.created_at))
+                ? [...ev]
+                    .map((item) => item.created_at || "")
+                    .filter(Boolean)
+                    .sort()
+                    .at(-1) ?? null
+                : null;
 
             return (
               <div
                 key={relId}
-                className="rounded-atelier border border-border bg-surface p-3"
+                className={
+                  "rounded-atelier border bg-surface p-3 " +
+                  (isFocused ? "border-accent/50 ring-1 ring-accent/20" : "border-border")
+                }
                 aria-label={`structured_character_relation_${relId}`}
               >
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div>
-                    <div className="text-sm text-ink">
+                    <div className="flex flex-wrap items-center gap-2 text-sm text-ink">
                       {fromName} --({relType})→ {toName}
+                      <span className="rounded-full border border-border px-2 py-0.5 text-[11px] text-subtext">
+                        {relType}
+                      </span>
+                      {isFocused ? (
+                        <span className="rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 text-[11px] text-ink">
+                          当前聚焦
+                        </span>
+                      ) : null}
                     </div>
                     <div className="mt-1 text-[11px] text-subtext">{relId}</div>
                     {r.deleted_at ? (
-                      <div className="mt-1 text-[11px] text-danger">deleted_at: {r.deleted_at}</div>
+                      <div className="mt-1">
+                        <Badge tone="warning">已删除于 {r.deleted_at}</Badge>
+                      </div>
                     ) : null}
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
@@ -583,7 +702,7 @@ export function CharacterRelationsView(props: {
                       aria-label={`structured_character_relation_toggle_evidence_${relId}`}
                       type="button"
                     >
-                      {open ? "收起证据" : "展开证据"}
+                      {open ? "收起证据" : ev ? `展开证据 (${ev.length})` : "展开证据"}
                     </button>
                   </div>
                 </div>
@@ -594,10 +713,10 @@ export function CharacterRelationsView(props: {
 
                 {isEditing ? (
                   <div className="mt-3 grid gap-3 rounded-atelier border border-border bg-canvas p-3">
-                    <div className="text-xs text-subtext">编辑关系（upsert）</div>
+                    <div className="text-xs text-subtext">编辑这条关系</div>
                     <div className="grid gap-3 lg:grid-cols-4">
                       <label className="grid gap-1">
-                        <span className="text-xs text-subtext">From</span>
+                        <span className="text-xs text-subtext">关系起点</span>
                         <select
                           className="select"
                           id="structured_character_relations_edit_from"
@@ -627,7 +746,7 @@ export function CharacterRelationsView(props: {
                         />
                       </label>
                       <label className="grid gap-1">
-                        <span className="text-xs text-subtext">To</span>
+                        <span className="text-xs text-subtext">关系终点</span>
                         <select
                           className="select"
                           id="structured_character_relations_edit_to"
@@ -658,7 +777,7 @@ export function CharacterRelationsView(props: {
                       </div>
                     </div>
                     <label className="grid gap-1">
-                      <span className="text-xs text-subtext">描述（可选）</span>
+                      <span className="text-xs text-subtext">补充描述（可选）</span>
                       <textarea
                         className="textarea"
                         rows={2}
@@ -674,28 +793,72 @@ export function CharacterRelationsView(props: {
                 {open ? (
                   <div className="mt-3 rounded-atelier border border-border bg-canvas p-3">
                     <div className="flex items-center justify-between gap-2">
-                      <div className="text-xs text-subtext">证据（source_id = relation_id）</div>
+                      <div className="text-xs text-subtext">关联证据</div>
                       <div className="text-[11px] text-subtext">
                         {evLoading ? "加载中..." : ev ? `共 ${ev.length} 条` : "未加载"}
                       </div>
                     </div>
+                    {!evLoading ? (
+                      <div className="result-overview-grid mt-3 lg:grid-cols-3">
+                        <div className="result-overview-card is-emphasis">
+                          <div className="result-overview-label">证据数量</div>
+                          <div className="result-overview-value">{ev?.length ?? 0}</div>
+                          <div className="result-overview-copy">
+                            先看数量是否合理，再决定要不要逐条细读证据内容。
+                          </div>
+                        </div>
+                        <div className="result-overview-card">
+                          <div className="result-overview-label">来源分布</div>
+                          <div className="result-overview-value">{evidenceSourceSummary}</div>
+                          <div className="result-overview-copy">
+                            用这个摘要判断证据主要来自正文、图谱还是其他导入来源。
+                          </div>
+                        </div>
+                        <div className="result-overview-card">
+                          <div className="result-overview-label">最近证据时间</div>
+                          <div className="result-overview-value">{latestEvidenceAt || "未记录"}</div>
+                          <div className="result-overview-copy">
+                            如果证据很旧或完全缺失，优先回正文或图谱链路继续补证据。
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
                     {evLoading ? <div className="mt-2 text-xs text-subtext">加载中...</div> : null}
                     {!evLoading && ev && ev.length === 0 ? (
-                      <div className="mt-2 text-xs text-subtext">暂无证据</div>
+                      <FeedbackEmptyState
+                        className="mt-2"
+                        variant="compact"
+                        title="这条关系还没有证据"
+                        description="如果你想确认这条关系是否有依据，可以回到图谱查询、正文或世界资料里继续补证据。"
+                      />
                     ) : null}
                     {!evLoading && ev && ev.length > 0 ? (
-                      <div className="mt-2 grid gap-2">
+                      <div className="mt-3 grid gap-2">
                         {ev.map((item) => (
-                          <div
+                          <FeedbackDisclosure
                             key={String(item.id)}
-                            className="rounded-atelier border border-border bg-surface p-2 text-xs"
-                            aria-label={`structured_character_relation_evidence_${relId}_${String(item.id)}`}
+                            className="evidence-summary-card"
+                            summaryClassName="text-xs text-subtext hover:text-ink"
+                            bodyClassName="pt-3"
+                            title={
+                              <div
+                                className="evidence-summary-title"
+                                aria-label={`structured_character_relation_evidence_${relId}_${String(item.id)}`}
+                              >
+                                <div className="min-w-0">
+                                  <div className="text-xs text-ink">
+                                    {item.source_type}:{item.source_id ?? "-"}
+                                  </div>
+                                  <div className="evidence-summary-copy">{compactQuotePreview(item.quote_md)}</div>
+                                </div>
+                                <div className="text-[11px] text-subtext">{item.created_at ?? "-"}</div>
+                              </div>
+                            }
                           >
-                            <div className="text-[11px] text-subtext">
-                              {item.source_type}:{item.source_id ?? "-"} | {item.created_at ?? "-"}
-                            </div>
-                            <div className="mt-1 whitespace-pre-wrap text-subtext">{item.quote_md || "（空）"}</div>
-                          </div>
+                            <pre className="drawer-workbench-codeblock mt-2 whitespace-pre-wrap text-[11px] leading-5 text-subtext">
+                              {item.quote_md || "（空）"}
+                            </pre>
+                          </FeedbackDisclosure>
                         ))}
                       </div>
                     ) : null}
@@ -705,7 +868,7 @@ export function CharacterRelationsView(props: {
             );
           })}
         </div>
-      </div>
+      </section>
     </div>
   );
 }

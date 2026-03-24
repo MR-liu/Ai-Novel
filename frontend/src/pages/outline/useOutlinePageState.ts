@@ -10,6 +10,7 @@ import { useAutoSave } from "../../hooks/useAutoSave";
 import { usePersistentOutletIsActive } from "../../hooks/usePersistentOutlet";
 import { useSaveHotkey } from "../../hooks/useSaveHotkey";
 import { useWizardProgress } from "../../hooks/useWizardProgress";
+import { buildProjectWritePath } from "../../lib/projectRoutes";
 import { ApiError, apiJson } from "../../services/apiClient";
 import { chapterStore } from "../../services/chapterStore";
 import { markWizardProjectChanged } from "../../services/wizard";
@@ -344,7 +345,7 @@ export function useOutlinePageState(): OutlinePageState {
       toast.toastSuccess(getOutlineCreatedChaptersText(chaptersForSkeleton.length));
       markWizardProjectChanged(projectId);
       bumpWizardLocal();
-      navigate(`/projects/${projectId}/writing`);
+      navigate(buildProjectWritePath(projectId));
     } catch (error) {
       const err = error as ApiError;
       if (err.code === "CONFLICT" && err.status === 409) {
@@ -355,7 +356,7 @@ export function useOutlinePageState(): OutlinePageState {
           toast.toastSuccess(getOutlineCreatedChaptersText(chaptersForSkeleton.length, true));
           markWizardProjectChanged(projectId);
           bumpWizardLocal();
-          navigate(`/projects/${projectId}/writing`);
+          navigate(buildProjectWritePath(projectId));
         } catch (retryError) {
           const retryErr = retryError as ApiError;
           toast.toastError(`${retryErr.message} (${retryErr.code})`, retryErr.requestId);

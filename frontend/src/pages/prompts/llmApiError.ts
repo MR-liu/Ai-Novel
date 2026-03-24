@@ -1,6 +1,6 @@
 import { ApiError } from "../../services/apiClient";
 
-export function formatLlmTestApiError(err: ApiError): string {
+function extractErrorDetails(err: ApiError) {
   const details =
     err.details && typeof err.details === "object" && err.details !== null
       ? (err.details as Record<string, unknown>)
@@ -36,19 +36,48 @@ export function formatLlmTestApiError(err: ApiError): string {
           .slice(0, 6)
           .join("、")
       : null;
+
+  return {
+    compatAdjustments,
+    details,
+    upstreamError,
+    upstreamStatusCode,
+  };
+}
+
+export function formatLlmTestApiError(err: ApiError): string {
+  const { compatAdjustments, upstreamError, upstreamStatusCode } = extractErrorDetails(err);
   return err.code === "LLM_KEY_MISSING"
-    ? "请先保存 API Key"
+    ? "这份连接档案还没有保存访问密钥，先保存后再做连接检查"
     : err.code === "LLM_AUTH_ERROR"
-      ? "API Key 无效或已过期，请检查后重试"
+      ? "这份访问密钥没有通过验证，请检查是否填写了正确且仍有效的密钥"
       : err.code === "LLM_TIMEOUT"
-        ? "连接超时，请检查网络或 base_url 是否正确"
+        ? "模型服务暂时没有回应，请检查网络或服务地址后再试"
         : err.code === "LLM_BAD_REQUEST"
-          ? `请求参数有误，可能是模型名称或参数不支持${upstreamError ? `（上游：${upstreamError}）` : ""}${
-              compatAdjustments ? `（兼容：${compatAdjustments}）` : ""
+          ? `这次连接检查没有发出去，通常是模型名、参数或兼容设置还不合适${
+              upstreamError ? `（服务返回：${upstreamError}）` : ""
+            }${
+              compatAdjustments ? `（已自动调整：${compatAdjustments}）` : ""
             }`
           : err.code === "LLM_UPSTREAM_ERROR"
-            ? `服务暂时不可用，请稍后重试（${
+            ? `模型服务暂时不可用，稍后再试即可（${
                 typeof upstreamStatusCode === "number" ? upstreamStatusCode : err.status
               }）`
-            : err.message;
+            : `连接检查未完成：${err.message}`;
+}
+
+export function formatLlmModelListError(err: ApiError): string {
+  const { upstreamStatusCode } = extractErrorDetails(err);
+
+  return err.code === "LLM_KEY_MISSING"
+    ? "当前连接档案还没有保存访问密钥，暂时无法刷新候选模型"
+    : err.code === "LLM_AUTH_ERROR"
+      ? "当前访问密钥没有通过验证，暂时无法刷新候选模型"
+      : err.code === "LLM_TIMEOUT"
+        ? "模型服务响应较慢，暂时没拿到候选模型"
+        : err.code === "LLM_UPSTREAM_ERROR"
+          ? `模型服务暂时不可用，暂时没拿到候选模型（${
+              typeof upstreamStatusCode === "number" ? upstreamStatusCode : err.status
+            }）`
+          : `暂时没拿到候选模型：${err.message}`;
 }

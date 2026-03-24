@@ -1,16 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  APP_SHELL_ADVANCED_DEBUG_PROJECT_NAV_GROUP,
-  APP_SHELL_PRIMARY_PROJECT_NAV_GROUPS,
+  APP_SHELL_FOCUS_NAV_SECTIONS,
   APP_SHELL_PROJECT_NAV_ITEMS,
+  APP_SHELL_STUDIO_NAV_SECTIONS,
   getAppShellProjectNavItems,
 } from "./appShellNavConfig";
 
 describe("appShellNavConfig", () => {
-  it("keeps deterministic group order for primary navigation", () => {
-    expect(APP_SHELL_PRIMARY_PROJECT_NAV_GROUPS).toEqual(["workbench", "view", "aiConfig"]);
-    expect(APP_SHELL_ADVANCED_DEBUG_PROJECT_NAV_GROUP).toBe("advancedDebug");
+  it("keeps deterministic section order for focus and studio modes", () => {
+    expect(APP_SHELL_FOCUS_NAV_SECTIONS).toEqual(["core"]);
+    expect(APP_SHELL_STUDIO_NAV_SECTIONS).toEqual(["core", "studio"]);
   });
 
   it("ensures each nav item id and route are unique", () => {
@@ -22,21 +22,19 @@ describe("appShellNavConfig", () => {
     expect(new Set(routes).size).toBe(routes.length);
   });
 
-  it("keeps every group non-empty and includes critical entries", () => {
-    const workbench = getAppShellProjectNavItems("workbench").map((item) => item.id);
-    const view = getAppShellProjectNavItems("view").map((item) => item.id);
-    const aiConfig = getAppShellProjectNavItems("aiConfig").map((item) => item.id);
-    const advancedDebug = getAppShellProjectNavItems("advancedDebug").map((item) => item.id);
+  it("keeps every section non-empty and includes critical entries", () => {
+    const core = getAppShellProjectNavItems("core").map((item) => item.id);
+    const studio = getAppShellProjectNavItems("studio").map((item) => item.id);
 
-    expect(workbench.length).toBeGreaterThan(0);
-    expect(view.length).toBeGreaterThan(0);
-    expect(aiConfig.length).toBeGreaterThan(0);
-    expect(advancedDebug.length).toBeGreaterThan(0);
+    expect(core.length).toBeGreaterThan(0);
+    expect(studio.length).toBeGreaterThan(0);
 
-    expect(workbench).toContain("writing");
-    expect(view).toContain("chapterAnalysis");
-    expect(view).toContain("foreshadows");
-    expect(aiConfig).toContain("prompts");
-    expect(advancedDebug).toContain("search");
+    expect(core).toContain("projectHome");
+    expect(core).toContain("storyBible");
+    expect(core).toContain("write");
+    expect(core).toContain("review");
+    expect(studio).toContain("aiStudio");
+    expect(studio).toContain("researchDesk");
+    expect(studio).toContain("systemHub");
   });
 });

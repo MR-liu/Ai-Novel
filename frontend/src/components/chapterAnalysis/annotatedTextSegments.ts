@@ -10,6 +10,10 @@ export type AnnotatedTextSegment =
       groupAnnotations: MemoryAnnotation[];
       activeAnnotations: MemoryAnnotation[];
       primary: MemoryAnnotation;
+      overlapCount: number;
+      activeCount: number;
+      isOverlap: boolean;
+      isBridge: boolean;
     };
 
 function pickPrimary(active: MemoryAnnotation[], group: MemoryAnnotation[]): MemoryAnnotation {
@@ -71,6 +75,30 @@ export function buildAnnotatedTextSegments(args: {
   const groups = buildGroups(spans, adjacencyTolerance);
   const segments: AnnotatedTextSegment[] = [];
 
+  function pushAnnotatedSegment(args: {
+    text: string;
+    start: number;
+    end: number;
+    groupAnnotations: MemoryAnnotation[];
+    activeAnnotations: MemoryAnnotation[];
+  }) {
+    const overlapCount = args.groupAnnotations.length;
+    const activeCount = args.activeAnnotations.length;
+    segments.push({
+      kind: "annotated",
+      text: args.text,
+      start: args.start,
+      end: args.end,
+      groupAnnotations: args.groupAnnotations,
+      activeAnnotations: args.activeAnnotations,
+      primary: pickPrimary(args.activeAnnotations, args.groupAnnotations),
+      overlapCount,
+      activeCount,
+      isOverlap: activeCount > 1,
+      isBridge: activeCount === 0 && overlapCount > 1,
+    });
+  }
+
   let cursor = 0;
   for (const group of groups) {
     if (group.start > cursor) {
@@ -99,14 +127,12 @@ export function buildAnnotatedTextSegments(args: {
       const nextPos = events[idx].pos;
       if (nextPos > pos) {
         const active = Array.from(activeById.values());
-        segments.push({
-          kind: "annotated",
+        pushAnnotatedSegment({
           text: content.slice(pos, nextPos),
           start: pos,
           end: nextPos,
           groupAnnotations: dedupedGroup,
           activeAnnotations: active,
-          primary: pickPrimary(active, dedupedGroup),
         });
       }
 
@@ -121,14 +147,12 @@ export function buildAnnotatedTextSegments(args: {
 
     if (pos < group.end) {
       const active = Array.from(activeById.values());
-      segments.push({
-        kind: "annotated",
+      pushAnnotatedSegment({
         text: content.slice(pos, group.end),
         start: pos,
         end: group.end,
         groupAnnotations: dedupedGroup,
         activeAnnotations: active,
-        primary: pickPrimary(active, dedupedGroup),
       });
     }
 

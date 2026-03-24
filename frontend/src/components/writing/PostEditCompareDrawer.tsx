@@ -83,10 +83,10 @@ export function PostEditCompareDrawer(props: Props) {
           <div className="mt-1 text-xs text-subtext">
             {props.requestId ? (
               <>
-                request_id: <span className="font-mono">{props.requestId}</span>
+                定位编号: <span className="font-mono">{props.requestId}</span>
               </>
             ) : (
-              "request_id: （未知）"
+              "定位编号: （未知）"
             )}
           </div>
         </div>
@@ -97,7 +97,7 @@ export function PostEditCompareDrawer(props: Props) {
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs text-subtext">视图</span>
+          <span className="text-xs text-subtext">查看方式</span>
           {(["diff", "raw", "post_edit"] as const).map((v) => (
             <button
               key={v}
@@ -105,7 +105,7 @@ export function PostEditCompareDrawer(props: Props) {
               onClick={() => setMode(v)}
               type="button"
             >
-              {v === "diff" ? "差异" : v === "raw" ? "原稿" : "后处理稿"}
+              {v === "diff" ? "前后差异" : v === "raw" ? "原稿" : "润色稿"}
             </button>
           ))}
         </div>
@@ -123,13 +123,13 @@ export function PostEditCompareDrawer(props: Props) {
             onClick={applyPostEdit}
             type="button"
           >
-            采用后处理稿
+            采用润色稿
           </button>
         </div>
       </div>
 
       <div className="mt-3 text-[11px] text-subtext">
-        {hasDiff ? "提示：- 为原稿行，+ 为后处理行。" : "提示：原稿与后处理稿内容一致，无差异。"}
+        {hasDiff ? "提示：`-` 表示原稿行，`+` 表示润色稿行。" : "提示：原稿与润色稿内容一致，没有差异。"}
       </div>
 
       <div className="mt-4">

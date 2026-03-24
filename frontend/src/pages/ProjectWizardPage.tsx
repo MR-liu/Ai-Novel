@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { motion, useReducedMotion } from "framer-motion";
+import { useReducedMotion } from "framer-motion";
 import { CheckCircle2, Circle, CircleSlash2, Wand2 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -10,9 +10,9 @@ import { ProgressBar } from "../components/ui/ProgressBar";
 import { useConfirm } from "../components/ui/confirm";
 import { useToast } from "../components/ui/toast";
 import { useProjects } from "../contexts/projects";
+import { buildProjectOutlinePath, buildProjectWritePath, buildStudioAiPath } from "../lib/projectRoutes";
 import { useChapterMetaList } from "../hooks/useChapterMetaList";
 import { useProjectData } from "../hooks/useProjectData";
-import { duration, transition } from "../lib/motion";
 import { UI_COPY } from "../lib/uiCopy";
 import { ApiError, apiJson } from "../services/apiClient";
 import { chapterStore } from "../services/chapterStore";
@@ -123,7 +123,7 @@ export function ProjectWizardPage() {
     if (!projectId) return;
     if (!llmPreset) {
       toast.toastError(`未加载到模型配置，请先在「${UI_COPY.nav.prompts}」页保存模型预设`);
-      navigate(`/projects/${projectId}/prompts`);
+      navigate(buildStudioAiPath(projectId, "models"));
       return;
     }
     const headers: Record<string, string> = { "X-LLM-Provider": llmPreset.provider };
@@ -157,7 +157,7 @@ export function ProjectWizardPage() {
       const genChapters = outlineGen.data.chapters ?? [];
       if (genChapters.length === 0) {
         toast.toastError("已生成大纲，但未解析出章节结构；请到大纲页手动调整并创建章节。");
-        navigate(`/projects/${projectId}/outline`);
+        navigate(buildProjectOutlinePath(projectId));
         return;
       }
 
@@ -204,7 +204,7 @@ export function ProjectWizardPage() {
       }
 
       toast.toastSuccess("已生成大纲并创建章节骨架");
-      navigate(`/projects/${projectId}/writing`);
+      navigate(buildProjectWritePath(projectId));
     } catch (e) {
       const err = e as ApiError;
       toast.toastError(`${err.message} (${err.code})`, err.requestId);
@@ -236,23 +236,19 @@ export function ProjectWizardPage() {
 
   return (
     <div className="grid gap-6 pb-[calc(6rem+env(safe-area-inset-bottom))]">
-      <section className="panel p-6">
+      <section className="surface p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="grid gap-2">
-            <div className="font-content text-xl">开工向导</div>
-            <div className="text-xs text-subtext">
+            <div className="editorial-kicker">当前开工状态</div>
+            <div className="font-content text-2xl text-ink">{project?.name ?? "当前项目"}</div>
+            <div className="max-w-3xl text-sm leading-7 text-subtext">
               {project ? (
                 <>
-                  {UI_COPY.nav.currentProject}：<span className="text-ink">{project.name}</span>
-                  <span className="mx-2 text-subtext/60">·</span>
-                  按步骤跑通闭环：{UI_COPY.nav.projectSettings} → {UI_COPY.nav.characters} → {UI_COPY.nav.prompts} →{" "}
-                  {UI_COPY.nav.outline} → {UI_COPY.nav.writing} → {UI_COPY.nav.preview} → {UI_COPY.nav.export}
+                  先把 {UI_COPY.nav.projectSettings}、{UI_COPY.nav.characters}、{UI_COPY.nav.prompts} 和{" "}
+                  {UI_COPY.nav.outline} 跑通，再进入稳定写作。当前项目会按这条主线继续推进。
                 </>
               ) : (
-                <>
-                  按步骤跑通闭环：{UI_COPY.nav.projectSettings} → {UI_COPY.nav.characters} → {UI_COPY.nav.prompts} →{" "}
-                  {UI_COPY.nav.outline} → {UI_COPY.nav.writing} → {UI_COPY.nav.preview} → {UI_COPY.nav.export}
-                </>
+                "先把设定、角色、模型和大纲准备好，再进入稳定写作。"
               )}
             </div>
           </div>
@@ -268,13 +264,17 @@ export function ProjectWizardPage() {
 
         <div className="mt-4">
           <ProgressBar ariaLabel="项目开工向导完成度" value={progress.percent} />
-          <div className="mt-2 text-xs text-subtext">完成度：{progress.percent}%</div>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-subtext">
+            <span>完成度：{progress.percent}%</span>
+            <span className="text-subtext/60">·</span>
+            <span>{nextStep ? `下一步建议：${nextStep.title}` : "主线准备已完成，可以继续写作"}</span>
+          </div>
         </div>
       </section>
 
       <section className="panel p-6">
         <div className="grid gap-1">
-          <div className="font-content text-xl">从这里开始</div>
+          <div className="font-content text-xl">选择开工方式</div>
           <div className="text-xs text-subtext">请选择「按步骤（推荐）」或「快速开工（自动）」；两者都可随时切换。</div>
         </div>
         <div className="mt-4 grid gap-3 md:grid-cols-2">
@@ -336,18 +336,10 @@ export function ProjectWizardPage() {
 
       <section className="panel p-6" id="wizard-steps">
         <div className="grid gap-1">
-          <div className="font-content text-xl">步骤清单</div>
+          <div className="font-content text-xl">准备清单</div>
           <div className="text-xs text-subtext">从上到下完成；不适用的步骤可以先跳过，之后也可取消跳过。</div>
         </div>
-        <motion.div
-          className="mt-4 grid gap-3"
-          initial="hidden"
-          animate="show"
-          variants={{
-            hidden: {},
-            show: { transition: { staggerChildren: reduceMotion ? 0 : duration.stagger } },
-          }}
-        >
+        <div className="mt-4 grid gap-3">
           {progress.steps.map((s) => {
             const Icon = s.state === "done" ? CheckCircle2 : s.state === "skipped" ? CircleSlash2 : Circle;
             const badge =
@@ -359,17 +351,7 @@ export function ProjectWizardPage() {
                     ? "下一步"
                     : "待完成";
             return (
-              <motion.div
-                key={s.key}
-                className="surface p-4"
-                initial="hidden"
-                animate="show"
-                variants={{
-                  hidden: reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8 },
-                  show: reduceMotion ? { opacity: 1 } : { opacity: 1, y: 0 },
-                }}
-                transition={reduceMotion ? { duration: 0.01 } : transition.base}
-              >
+              <div key={s.key} className="surface p-4">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
                     <Icon
@@ -419,10 +401,10 @@ export function ProjectWizardPage() {
                     </button>
                   ) : null}
                 </div>
-              </motion.div>
+              </div>
             );
           })}
-        </motion.div>
+        </div>
       </section>
 
       <WizardNextBar

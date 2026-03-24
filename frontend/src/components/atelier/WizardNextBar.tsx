@@ -3,6 +3,7 @@ import { ArrowRight, CheckCircle2, ChevronDown, ChevronUp, Circle, CircleSlash2,
 import { useCallback, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { buildProjectHomePath } from "../../lib/projectRoutes";
 import { ProgressBar } from "../ui/ProgressBar";
 import { getCurrentUserId } from "../../services/currentUser";
 import { wizardBarCollapsedStorageKey } from "../../services/uiState";
@@ -74,7 +75,7 @@ export function WizardNextBar(props: {
     [busy],
   );
 
-  const wizardHref = projectId ? `/projects/${projectId}/wizard` : null;
+  const wizardHref = projectId ? buildProjectHomePath(projectId, "setup") : null;
   const done = !progress.nextStep;
   const showBackToOverview = Boolean(progress.exportedAt && progress.nextStep);
 
@@ -104,7 +105,7 @@ export function WizardNextBar(props: {
     if (!next) {
       return {
         label: "已完成：回到项目概览",
-        onClick: () => goto("/"),
+        onClick: () => goto(projectId ? buildProjectHomePath(projectId) : "/"),
       };
     }
 
@@ -126,7 +127,7 @@ export function WizardNextBar(props: {
       label: `下一步：${next.title}`,
       onClick: () => goto(next.href),
     };
-  }, [current, currentStep, dirty, goto, next, onSave, previewStep, primaryAction, saving]);
+  }, [current, currentStep, dirty, goto, next, onSave, previewStep, primaryAction, projectId, saving]);
 
   if (!projectId) return null;
 
@@ -241,7 +242,7 @@ export function WizardNextBar(props: {
                     <button
                       className="btn btn-secondary"
                       disabled={loading || busy}
-                      onClick={() => goto("/")}
+                      onClick={() => goto(projectId ? buildProjectHomePath(projectId) : "/")}
                       type="button"
                     >
                       已完成：回到项目概览

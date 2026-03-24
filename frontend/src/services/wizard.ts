@@ -1,5 +1,14 @@
 import { getCurrentUserId } from "./currentUser";
 import { storageKey } from "./storageKeys";
+import {
+  buildProjectHomePath,
+  buildProjectOutlinePath,
+  buildProjectPublishPath,
+  buildProjectReviewPath,
+  buildProjectWritePath,
+  buildStoryBiblePath,
+  buildStudioAiPath,
+} from "../lib/projectRoutes";
 import type { Chapter, Character, LLMPreset, LLMProfile, Outline, Project, ProjectSettings } from "../types";
 
 export type WizardStepKey =
@@ -150,7 +159,6 @@ export function hasWizardPreviewSeen(projectId: string): boolean {
 
 export function computeWizardProgress(input: WizardComputeInput): WizardProgress {
   const projectId = input.project?.id ?? "";
-  const base = projectId ? `/projects/${projectId}` : "";
 
   const exportedAt = projectId ? getWizardExportedAt(projectId) : null;
   const changedAt = projectId ? getWizardProjectChangedAt(projectId) : null;
@@ -171,7 +179,7 @@ export function computeWizardProgress(input: WizardComputeInput): WizardProgress
       key: "settings",
       title: "补齐设定",
       description: "填写世界观/风格/约束（越具体越好）。",
-      href: `${base}/settings`,
+      href: projectId ? buildProjectHomePath(projectId, "settings") : "",
       done: Boolean(
         isNonEmpty(input.settings?.world_setting) ||
         isNonEmpty(input.settings?.style_guide) ||
@@ -184,14 +192,14 @@ export function computeWizardProgress(input: WizardComputeInput): WizardProgress
       key: "characters",
       title: "添加角色卡",
       description: "至少创建 1 个核心角色，后续生成会注入角色信息。",
-      href: `${base}/characters`,
+      href: projectId ? buildStoryBiblePath(projectId, "characters") : "",
       done: (input.characters?.length ?? 0) > 0,
     }),
     makeStep({
       key: "llm",
       title: "配置模型并测试连接",
       description: "保存后端配置（含 API Key），点击“测试连接”。",
-      href: `${base}/prompts`,
+      href: projectId ? buildStudioAiPath(projectId, "models") : "",
       done: Boolean(
         projectId &&
         input.llmPreset &&
@@ -204,35 +212,35 @@ export function computeWizardProgress(input: WizardComputeInput): WizardProgress
       key: "outline",
       title: "生成/编辑大纲",
       description: "用 AI 生成大纲后“应用生成结果”，或手动编写并保存。",
-      href: `${base}/outline`,
+      href: projectId ? buildProjectOutlinePath(projectId) : "",
       done: isNonEmpty(input.outline?.content_md),
     }),
     makeStep({
       key: "chapters",
       title: "创建章节骨架",
       description: "从大纲一键创建章节骨架，或在写作页手动创建章节。",
-      href: `${base}/outline`,
+      href: projectId ? buildProjectOutlinePath(projectId) : "",
       done: (input.chapters?.length ?? 0) > 0,
     }),
     makeStep({
       key: "writing",
       title: "完成全部章节",
       description: "将所有章节标记为 done（写完一章就设为 done）。",
-      href: `${base}/writing`,
+      href: projectId ? buildProjectWritePath(projectId) : "",
       done: totalChapters > 0 && doneChapters >= totalChapters,
     }),
     makeStep({
       key: "preview",
       title: "预览阅读",
       description: "在预览页通读章节内容，并可跳转回写作页快速修改。",
-      href: `${base}/preview`,
+      href: projectId ? buildProjectReviewPath(projectId, "preview") : "",
       done: projectId ? hasWizardPreviewSeen(projectId) : false,
     }),
     makeStep({
       key: "export",
       title: "导出整本 Markdown",
       description: "在导出页选择范围，下载 `.md` 文件。",
-      href: `${base}/export`,
+      href: projectId ? buildProjectPublishPath(projectId) : "",
       done: Boolean(projectId && exportIsFresh),
     }),
   ];
@@ -274,7 +282,6 @@ export type WizardSummaryComputeInput = {
 
 export function computeWizardProgressFromSummary(input: WizardSummaryComputeInput): WizardProgress {
   const projectId = input.project?.id ?? "";
-  const base = projectId ? `/projects/${projectId}` : "";
 
   const exportedAt = projectId ? getWizardExportedAt(projectId) : null;
   const changedAt = projectId ? getWizardProjectChangedAt(projectId) : null;
@@ -295,7 +302,7 @@ export function computeWizardProgressFromSummary(input: WizardSummaryComputeInpu
       key: "settings",
       title: "补齐设定",
       description: "填写世界观/风格/约束（越具体越好）。",
-      href: `${base}/settings`,
+      href: projectId ? buildProjectHomePath(projectId, "settings") : "",
       done: Boolean(
         isNonEmpty(input.settings?.world_setting) ||
         isNonEmpty(input.settings?.style_guide) ||
@@ -308,14 +315,14 @@ export function computeWizardProgressFromSummary(input: WizardSummaryComputeInpu
       key: "characters",
       title: "添加角色卡",
       description: "至少创建 1 个核心角色，后续生成会注入角色信息。",
-      href: `${base}/characters`,
+      href: projectId ? buildStoryBiblePath(projectId, "characters") : "",
       done: (input.characters_count ?? 0) > 0,
     }),
     makeStep({
       key: "llm",
       title: "配置模型并测试连接",
       description: "保存后端配置（含 API Key），点击“测试连接”。",
-      href: `${base}/prompts`,
+      href: projectId ? buildStudioAiPath(projectId, "models") : "",
       done: Boolean(
         projectId &&
         input.llm_preset &&
@@ -328,35 +335,35 @@ export function computeWizardProgressFromSummary(input: WizardSummaryComputeInpu
       key: "outline",
       title: "生成/编辑大纲",
       description: "用 AI 生成大纲后“应用生成结果”，或手动编写并保存。",
-      href: `${base}/outline`,
+      href: projectId ? buildProjectOutlinePath(projectId) : "",
       done: isNonEmpty(input.outline_content_md),
     }),
     makeStep({
       key: "chapters",
       title: "创建章节骨架",
       description: "从大纲一键创建章节骨架，或在写作页手动创建章节。",
-      href: `${base}/outline`,
+      href: projectId ? buildProjectOutlinePath(projectId) : "",
       done: totalChapters > 0,
     }),
     makeStep({
       key: "writing",
       title: "完成全部章节",
       description: "将所有章节标记为 done（写完一章就设为 done）。",
-      href: `${base}/writing`,
+      href: projectId ? buildProjectWritePath(projectId) : "",
       done: totalChapters > 0 && doneChapters >= totalChapters,
     }),
     makeStep({
       key: "preview",
       title: "预览阅读",
       description: "在预览页通读章节内容，并可跳转回写作页快速修改。",
-      href: `${base}/preview`,
+      href: projectId ? buildProjectReviewPath(projectId, "preview") : "",
       done: projectId ? hasWizardPreviewSeen(projectId) : false,
     }),
     makeStep({
       key: "export",
       title: "导出整本 Markdown",
       description: "在导出页选择范围，下载 `.md` 文件。",
-      href: `${base}/export`,
+      href: projectId ? buildProjectPublishPath(projectId) : "",
       done: Boolean(projectId && exportIsFresh),
     }),
   ];

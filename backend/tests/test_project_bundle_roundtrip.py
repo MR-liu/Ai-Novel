@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import json
 import unittest
+from typing import Generator
 
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
+from starlette.testclient import TestClient
 
+from app.api.routes import export as export_routes
+from app.api.routes import projects as projects_routes
+from app.core.errors import AppError
 from app.db.base import Base
+from app.db.session import get_db
+from app.main import app_error_handler, validation_error_handler
 from app.models.chapter import Chapter
 from app.models.character import Character
 from app.models.knowledge_base import KnowledgeBase
@@ -25,6 +35,35 @@ from app.models.worldbook_entry import WorldBookEntry
 from app.services.import_export_service import export_project_bundle, import_project_bundle
 from app.services.prompt_presets import ensure_default_chapter_preset, ensure_default_outline_preset
 from app.services.vector_kb_service import ensure_default_kb
+
+
+def _make_test_app(SessionLocal: sessionmaker) -> FastAPI:
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def _test_user_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
+        request.state.request_id = "rid-test"
+        user_id = request.headers.get("X-Test-User")
+        request.state.user_id = user_id
+        request.state.authenticated_user_id = user_id
+        request.state.session_expire_at = None
+        request.state.auth_source = "test"
+        return await call_next(request)
+
+    app.add_exception_handler(AppError, app_error_handler)
+    app.add_exception_handler(RequestValidationError, validation_error_handler)
+    app.include_router(projects_routes.router, prefix="/api")
+    app.include_router(export_routes.router, prefix="/api")
+
+    def _override_get_db() -> Generator[Session, None, None]:
+        db = SessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = _override_get_db
+    return app
 
 
 class TestProjectBundleRoundtrip(unittest.TestCase):
@@ -62,6 +101,7 @@ class TestProjectBundleRoundtrip(unittest.TestCase):
         )
 
         self.SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+        self.app = _make_test_app(self.SessionLocal)
 
     def test_export_then_import_creates_new_project(self) -> None:
         with self.SessionLocal() as db:
@@ -104,6 +144,47 @@ class TestProjectBundleRoundtrip(unittest.TestCase):
             new_settings = db.get(ProjectSettings, new_project_id)
             self.assertIsNotNone(new_settings)
             self.assertIsNone(new_settings.vector_embedding_api_key_ciphertext)
+
+    def test_export_bundle_route_returns_attachment(self) -> None:
+        with self.SessionLocal() as db:
+            _seed_project(db)
+
+        client = TestClient(self.app)
+        resp = client.get("/api/projects/p1/export/bundle", headers={"X-Test-User": "u1"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("application/json", resp.headers.get("content-type", ""))
+        self.assertIn(".bundle.json", resp.headers.get("content-disposition", ""))
+        payload = json.loads(resp.text)
+        self.assertEqual(payload.get("schema_version"), "project_bundle_v1")
+
+    def test_import_bundle_route_creates_project_and_surfaces_warnings(self) -> None:
+        with self.SessionLocal() as db:
+            _seed_project(db)
+            bundle = export_project_bundle(db, project_id="p1")
+
+        client = TestClient(self.app)
+        resp = client.post(
+            "/api/projects/import_bundle",
+            headers={"X-Test-User": "u1"},
+            json={"bundle": bundle, "rebuild_vectors": False},
+        )
+        self.assertEqual(resp.status_code, 200)
+        result = (resp.json().get("data") or {}).get("result") or {}
+        self.assertTrue(result.get("ok"))
+        self.assertTrue(str(result.get("project_id") or "").strip())
+        warnings = (((result.get("report") or {}).get("warnings")) or [])
+        self.assertIn("api_key_not_imported", warnings)
+
+    def test_import_bundle_route_rejects_unknown_schema(self) -> None:
+        client = TestClient(self.app)
+        resp = client.post(
+            "/api/projects/import_bundle",
+            headers={"X-Test-User": "u1"},
+            json={"bundle": {"schema_version": "unknown_v1"}, "rebuild_vectors": False},
+        )
+        self.assertEqual(resp.status_code, 400)
+        error = resp.json().get("error") or {}
+        self.assertEqual(error.get("code"), "VALIDATION_ERROR")
 
 
 def _count(db: Session, stmt) -> int:  # type: ignore[no-untyped-def]

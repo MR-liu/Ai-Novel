@@ -2,6 +2,7 @@ import { useId } from "react";
 
 import type { ProjectTaskRuntime } from "../../services/projectTaskRuntime";
 import { Modal } from "../ui/Modal";
+import { FeedbackCallout, FeedbackDisclosure, FeedbackEmptyState } from "../ui/Feedback";
 import { ProgressBar } from "../ui/ProgressBar";
 
 import type { BatchGenerationTask, BatchGenerationTaskItem } from "./types";
@@ -52,16 +53,16 @@ function readString(value: unknown, fallback = "-"): string {
 }
 
 function formatProjectTaskStreamStatus(status: "idle" | "connecting" | "open" | "error"): string {
-  if (status === "open") return "connected";
-  if (status === "connecting") return "reconnecting";
-  if (status === "error") return "fallback polling";
-  return "idle";
+  if (status === "open") return "已连接";
+  if (status === "connecting") return "重连中";
+  if (status === "error") return "已切回轮询";
+  return "未连接";
 }
 
 function buildStepLabel(item: BatchGenerationTaskItem): string {
-  const requestId = item.last_request_id ? ` ? request_id ${item.last_request_id}` : "";
-  const attempts = ` ? attempt ${item.attempt_count}`;
-  const error = item.error_message ? ` ? ${item.error_message}` : "";
+  const requestId = item.last_request_id ? ` | 定位编号 ${item.last_request_id}` : "";
+  const attempts = ` | 尝试 ${item.attempt_count}`;
+  const error = item.error_message ? ` | ${item.error_message}` : "";
   return `${item.status}${attempts}${requestId}${error}`;
 }
 
@@ -124,11 +125,10 @@ export function BatchGenerationModal(props: {
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="font-content text-xl text-ink" id={titleId}>
-            Batch Generation
+            批量起草
           </div>
           <div className="mt-1 text-xs text-subtext">
-            Batch generation writes generation runs only. Chapters stay unchanged until you apply a result to the
-            editor.
+            批量起草只会先生成候选结果与记录。在你把结果回填进编辑器前，章节正文不会被直接改写。
           </div>
         </div>
         <button
@@ -138,39 +138,39 @@ export function BatchGenerationModal(props: {
           disabled={props.batchLoading}
           type="button"
         >
-          Close
+          关闭
         </button>
       </div>
 
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-atelier border border-border bg-canvas px-3 py-2 text-xs text-subtext">
-        <span aria-label="batch_generation_live_status">Runtime SSE: {streamStatusLabel}</span>
+        <span aria-label="batch_generation_live_status">实时连接: {streamStatusLabel}</span>
         {props.taskCenterHref ? (
           <a
             className="btn btn-secondary btn-sm"
             href={props.taskCenterHref}
             aria-label="Open TaskCenter (batch_generation_open_task_center)"
           >
-            Open TaskCenter
+            打开任务中心
           </a>
         ) : null}
       </div>
 
       <div className="mt-4 grid gap-3">
         <div className="grid gap-2 rounded-atelier border border-border bg-canvas p-3">
-          <div className="text-sm font-medium text-ink">Step 1 ? Range</div>
+          <div className="text-sm font-medium text-ink">第一步：起草范围</div>
           <div className="text-xs text-subtext">
-            Start after: {props.activeChapterNumber ? `chapter ${props.activeChapterNumber}` : "chapter 1"}
+            从这里之后开始：{props.activeChapterNumber ? `第 ${props.activeChapterNumber} 章之后` : "第 1 章之后"}
           </div>
           <div className="text-[11px] text-subtext">
-            The active chapter decides the starting point. Generation continues sequentially after it.
+            当前章节会决定起点，系统会从它之后按顺序继续起草。
           </div>
         </div>
 
         <div className="grid gap-2 rounded-atelier border border-border bg-canvas p-3">
-          <div className="text-sm font-medium text-ink">Step 2 ? Options</div>
+          <div className="text-sm font-medium text-ink">第二步：起草选项</div>
           <div className="flex flex-wrap items-end gap-3">
             <label className="grid gap-1">
-              <span className="text-xs text-subtext">Count: 1~200</span>
+              <span className="text-xs text-subtext">章节数：1~200</span>
               <input
                 className="input w-28"
                 min={1}
@@ -189,14 +189,14 @@ export function BatchGenerationModal(props: {
                 disabled={props.batchLoading || taskRunning}
                 onChange={(e) => props.setBatchIncludeExisting(e.target.checked)}
               />
-              Include chapters that already have content
+              也包含已经有正文的章节
             </label>
           </div>
         </div>
 
         <div className="grid gap-3 rounded-atelier border border-border bg-surface p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="text-sm font-medium text-ink">Step 3 ? Run and recovery</div>
+            <div className="text-sm font-medium text-ink">第三步：启动与恢复</div>
             <div className="flex flex-wrap items-center gap-2">
               {!task || taskTerminal ? (
                 <button
@@ -205,7 +205,7 @@ export function BatchGenerationModal(props: {
                   onClick={props.onStartTask}
                   type="button"
                 >
-                  {props.batchLoading ? "Starting..." : "Start batch generation"}
+                  {props.batchLoading ? "启动中..." : "开始批量起草"}
                 </button>
               ) : null}
               {taskRunning ? (
@@ -216,7 +216,7 @@ export function BatchGenerationModal(props: {
                   aria-label="Pause batch generation (batch_generation_pause)"
                   type="button"
                 >
-                  {props.batchLoading ? "Working..." : "Pause"}
+                  {props.batchLoading ? "处理中..." : "暂停"}
                 </button>
               ) : null}
               {canResume ? (
@@ -227,7 +227,7 @@ export function BatchGenerationModal(props: {
                   aria-label="Resume batch generation (batch_generation_resume)"
                   type="button"
                 >
-                  {props.batchLoading ? "Working..." : "Resume"}
+                  {props.batchLoading ? "处理中..." : "继续"}
                 </button>
               ) : null}
               {canRetryFailed ? (
@@ -238,7 +238,7 @@ export function BatchGenerationModal(props: {
                   aria-label="Retry failed chapters (batch_generation_retry_failed)"
                   type="button"
                 >
-                  {props.batchLoading ? "Working..." : "Retry failed chapters"}
+                  {props.batchLoading ? "处理中..." : "重试失败章节"}
                 </button>
               ) : null}
               {canSkipFailed ? (
@@ -249,7 +249,7 @@ export function BatchGenerationModal(props: {
                   aria-label="Skip failed chapters (batch_generation_skip_failed)"
                   type="button"
                 >
-                  {props.batchLoading ? "Working..." : "Skip failed chapters"}
+                  {props.batchLoading ? "处理中..." : "跳过失败章节"}
                 </button>
               ) : null}
               {canCancel ? (
@@ -260,14 +260,18 @@ export function BatchGenerationModal(props: {
                   aria-label="Cancel batch generation (batch_generation_cancel)"
                   type="button"
                 >
-                  {props.batchLoading ? "Working..." : "Cancel batch"}
+                  {props.batchLoading ? "处理中..." : "取消本轮批量起草"}
                 </button>
               ) : null}
             </div>
           </div>
 
           {!task ? (
-            <div className="text-sm text-subtext">No batch exists yet. Configure options and start one when ready.</div>
+            <FeedbackEmptyState
+              variant="compact"
+              title="还没有批量生成任务"
+              description="先设定生成范围和策略，确认后再启动一轮批量起草。"
+            />
           ) : null}
 
           {task ? (
@@ -278,46 +282,51 @@ export function BatchGenerationModal(props: {
               >
                 <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-ink">
                   <span>
-                    Status: <span className="font-mono">{task.status}</span>
+                    当前状态：<span className="font-mono">{task.status}</span>
                   </span>
                   <span>
-                    completed {task.completed_count}/{task.total_count} ? failed {task.failed_count} ? skipped{" "}
+                    已完成 {task.completed_count}/{task.total_count} | 失败 {task.failed_count} | 跳过{" "}
                     {task.skipped_count}
                   </span>
                 </div>
                 <ProgressBar ariaLabel="Batch generation progress" value={taskProgressPercent} />
                 <div className="text-[11px] text-subtext">
-                  pause_requested: {String(task.pause_requested)} ? cancel_requested: {String(task.cancel_requested)}
+                  已请求暂停：{String(task.pause_requested)} | 已请求取消：{String(task.cancel_requested)}
                 </div>
-                {requestId ? <div className="text-[11px] text-subtext">request_id: {requestId}</div> : null}
+                {requestId ? <div className="text-[11px] text-subtext">定位编号: {requestId}</div> : null}
               </section>
 
               {latestCheckpoint ? (
                 <section className="rounded-atelier border border-border bg-canvas p-3">
-                  <div className="text-sm text-ink">Recovery point</div>
+                  <div className="text-sm text-ink">恢复节点</div>
                   <div className="mt-2 grid gap-1 text-xs text-subtext">
-                    <div>status: {readString(latestCheckpoint.status, task.status)}</div>
-                    <div>completed_count: {readNumber(latestCheckpoint.completed_count, task.completed_count)}</div>
-                    <div>failed_count: {readNumber(latestCheckpoint.failed_count, task.failed_count)}</div>
-                    <div>skipped_count: {readNumber(latestCheckpoint.skipped_count, task.skipped_count)}</div>
+                    <div>状态：{readString(latestCheckpoint.status, task.status)}</div>
+                    <div>已完成：{readNumber(latestCheckpoint.completed_count, task.completed_count)}</div>
+                    <div>失败：{readNumber(latestCheckpoint.failed_count, task.failed_count)}</div>
+                    <div>跳过：{readNumber(latestCheckpoint.skipped_count, task.skipped_count)}</div>
                   </div>
                 </section>
               ) : null}
 
               {task.error_json ? (
-                <div className="rounded-atelier border border-border bg-canvas p-3">
-                  <div className="text-sm text-ink">Error</div>
-                  <div className="mt-1 break-words text-xs text-subtext">{task.error_json}</div>
-                </div>
+                <FeedbackCallout tone="danger" title="批量生成任务返回错误">
+                  <div className="break-words text-xs">{task.error_json}</div>
+                </FeedbackCallout>
               ) : null}
 
-              <details
-                className="rounded-atelier border border-border bg-canvas p-3"
-                aria-label="batch_generation_runtime_timeline"
+              <FeedbackDisclosure
+                className="rounded-atelier border border-border bg-canvas px-3 py-2"
+                summaryClassName="text-sm text-ink"
+                bodyClassName="pt-2"
+                title="运行时间线"
               >
-                <summary className="cursor-pointer select-none text-sm text-ink">Runtime timeline</summary>
                 {timeline.length === 0 ? (
-                  <div className="mt-2 text-xs text-subtext">No runtime events yet.</div>
+                  <FeedbackEmptyState
+                    className="mt-1"
+                    variant="compact"
+                    title="还没有运行事件"
+                    description="任务开始推进后，这里会显示排队、重试、暂停和恢复等时间线。"
+                  />
                 ) : (
                   <div className="mt-3 max-h-48 space-y-2 overflow-auto text-xs text-subtext">
                     {timeline.map((entry) => (
@@ -327,36 +336,41 @@ export function BatchGenerationModal(props: {
                       >
                         <div className="flex flex-wrap items-center justify-between gap-2 text-ink">
                           <span>
-                            #{entry.seq} ? {entry.event_type}
+                            #{entry.seq} | {entry.event_type}
                           </span>
                           <span>{entry.created_at || "-"}</span>
                         </div>
                         <div className="mt-1 text-subtext">
-                          {entry.reason ? `reason: ${entry.reason}` : "reason: -"}
-                          {entry.source ? ` ? source: ${entry.source}` : ""}
+                          {entry.reason ? `原因: ${entry.reason}` : "原因: -"}
+                          {entry.source ? ` | 来源: ${entry.source}` : ""}
                         </div>
                       </div>
                     ))}
                   </div>
                 )}
-              </details>
+              </FeedbackDisclosure>
 
               <section
                 className="max-h-72 overflow-auto rounded-atelier border border-border bg-canvas"
                 aria-label="batch_generation_items"
               >
                 {props.batchItems.length === 0 ? (
-                  <div className="p-3 text-sm text-subtext">No batch items yet.</div>
+                  <FeedbackEmptyState
+                    className="m-3"
+                    variant="compact"
+                    title="还没有章节执行项"
+                    description="任务启动后，这里会按章节列出每一项的状态、错误和可回填结果。"
+                  />
                 ) : (
                   <div className="divide-y divide-border">
                     {props.batchItems.map((item) => (
                       <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 px-3 py-2">
                         <div className="min-w-0 flex-1">
-                          <div className="text-sm text-ink">Chapter {item.chapter_number}</div>
+                          <div className="text-sm text-ink">第 {item.chapter_number} 章</div>
                           <div className="mt-1 break-words text-xs text-subtext">{buildStepLabel(item)}</div>
                           {item.started_at || item.finished_at ? (
                             <div className="mt-1 text-[11px] text-subtext">
-                              started_at: {item.started_at || "-"} ? finished_at: {item.finished_at || "-"}
+                              开始于: {item.started_at || "-"} | 结束于: {item.finished_at || "-"}
                             </div>
                           ) : null}
                         </div>
@@ -368,7 +382,7 @@ export function BatchGenerationModal(props: {
                               disabled={props.batchLoading}
                               type="button"
                             >
-                              Apply to editor
+                              回填到编辑器
                             </button>
                           ) : null}
                         </div>

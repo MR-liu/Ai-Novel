@@ -1,12 +1,16 @@
 import { Plus, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 
+import { ResearchWorkbenchPanel } from "../components/layout/ResearchWorkbenchPanel";
 import { Badge } from "../components/ui/Badge";
 import { Drawer } from "../components/ui/Drawer";
+import { FeedbackDisclosure } from "../components/ui/Feedback";
 import { useConfirm } from "../components/ui/confirm";
 import { useToast } from "../components/ui/toast";
+import { buildProjectWritePath, buildStudioAiPath } from "../lib/projectRoutes";
 import { ApiError, apiJson } from "../services/apiClient";
+import { AI_WORKBENCH_COPY } from "./aiWorkbenchModels";
 
 type WritingStyle = {
   id: string;
@@ -55,6 +59,14 @@ export function StylesPage() {
     () => allStyles.find((s) => s.id === defaultStyleId) ?? null,
     [allStyles, defaultStyleId],
   );
+  const defaultStyleLabel = defaultStyle ? resolveStyleLabel(defaultStyle) : "（未设置）";
+  const nextActionText = loading
+    ? "先等风格库加载完成，再决定要不要调整项目默认。"
+    : defaultStyleId
+      ? "项目默认已经设好，下一步更适合抽样跑一次真实生成，确认语气是否稳定。"
+      : userStyles.length > 0
+        ? "先从已有风格里挑一个设为项目默认，再决定是否继续补充新的个人风格。"
+        : "先从系统预设试一个方向，或者新建你的第一套长期风格。";
 
   const refresh = useCallback(async () => {
     if (!projectId) return;
@@ -191,150 +203,211 @@ export function StylesPage() {
   );
 
   return (
-    <div className="grid gap-4">
-      <div className="panel p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="min-w-0">
-            <div className="font-content text-2xl text-ink">风格</div>
-            <div className="mt-1 text-xs text-subtext">
-              写作风格：一段会在生成时注入的“写作要求”。可设为项目默认，也可在「AI 生成」里按章节临时选择。
-            </div>
-            <div className="mt-1 text-[11px] text-subtext">
-              提示：高级参数的「润色 / 去味」会对生成结果做二次处理，可与风格叠加使用。
+    <div className="studio-shell">
+      <section className="manuscript-status-band">
+        <div className="grid gap-1">
+          <div className="text-sm text-ink">{nextActionText}</div>
+          <div className="text-xs text-subtext">
+            建议顺序：先定项目默认，再沉淀个人风格，最后回真实章节生成里判断口吻是否稳定。
+          </div>
+        </div>
+        <div className="manuscript-status-list">
+          <span className="manuscript-chip">项目默认：{defaultStyleLabel}</span>
+          <span className="manuscript-chip">系统预设：{presets.length}</span>
+          <span className="manuscript-chip">我的风格：{userStyles.length}</span>
+          <span className="manuscript-chip">{loading ? "正在同步风格库" : "风格库已加载"}</span>
+        </div>
+      </section>
+
+      <ResearchWorkbenchPanel eyebrow="当前 AI 路径" {...AI_WORKBENCH_COPY.styles} />
+
+      <section className="panel p-5">
+        <div className="studio-cluster-header">
+          <div>
+            <div className="studio-cluster-title">写作风格工作台</div>
+            <div className="studio-cluster-copy">
+              风格是一段会在生成时注入的长期写作要求。你可以把它设成项目默认，也可以在 AI 生成时按章节临时切换。
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button className="btn btn-secondary" onClick={() => void refresh()} disabled={loading} type="button">
-              {loading ? "刷新中..." : "刷新"}
-            </button>
-            <button className="btn btn-primary btn-icon" onClick={openCreate} type="button" aria-label="新建风格">
-              <Plus size={18} />
-            </button>
+          <div className="studio-cluster-meta">{loading ? "刷新中" : defaultStyle ? "已设项目默认" : "未设默认风格"}</div>
+        </div>
+
+        <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+          <div className="rounded-atelier border border-border bg-canvas p-3">
+            <div className="text-sm text-ink">什么时候该用风格</div>
+            <div className="mt-2 text-xs leading-6 text-subtext">
+              当你希望章节稳定保持某种叙述口吻、节奏或禁用表达时，优先用风格，而不是每次都把同样要求重新写进指令里。
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button className="btn btn-secondary" onClick={() => void refresh()} disabled={loading} type="button">
+                {loading ? "刷新中..." : "刷新"}
+              </button>
+              <button className="btn btn-primary btn-icon" onClick={openCreate} type="button" aria-label="新建风格">
+                <Plus size={18} />
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-atelier border border-border bg-canvas p-3">
+            <div className="text-sm text-ink">相关入口</div>
+            <div className="mt-2 text-xs leading-6 text-subtext">
+              风格会和模型、Prompt 蓝图叠加使用；高级参数里的“润色 / 去味”也会对最终结果做二次处理。设置好以后，最好回到写作页跑一次真实生成验证。
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {projectId ? (
+                <Link className="btn btn-secondary" to={buildStudioAiPath(projectId, "prompt-studio")}>
+                  打开提示词工作室
+                </Link>
+              ) : null}
+              {projectId ? (
+                <Link className="btn btn-secondary" to={buildProjectWritePath(projectId)}>
+                  回到写作页
+                </Link>
+              ) : null}
+            </div>
           </div>
         </div>
 
         {error ? (
-          <div className="mt-3 rounded-atelier border border-border bg-surface p-3 text-xs text-subtext">
+          <div className="mt-4 rounded-atelier border border-border bg-surface p-3 text-xs text-subtext">
             {error.message} ({error.code}) {error.requestId ? `| request_id: ${error.requestId}` : ""}
           </div>
         ) : null}
+      </section>
 
-        <div className="mt-4 grid gap-3">
-          <div className="rounded-atelier border border-border bg-surface p-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="min-w-0">
-                <div className="text-sm text-ink">项目默认</div>
-                <div className="mt-1 text-xs text-subtext" aria-label="project_default_style">
-                  {defaultStyle ? resolveStyleLabel(defaultStyle) : "（未设置）"}
-                </div>
-                <div className="mt-1 text-[11px] text-subtext">
-                  未在「AI 生成」中手动选择风格时，会自动使用项目默认。
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  className="btn btn-secondary"
-                  onClick={() => void setDefault(null)}
-                  disabled={!defaultStyleId}
-                  type="button"
-                >
-                  取消默认
-                </button>
-              </div>
+      <section className="studio-cluster">
+        <div className="studio-cluster-header">
+          <div>
+            <div className="studio-cluster-title">默认风格与风格库</div>
+            <div className="studio-cluster-copy">
+              建议顺序是“先设项目默认，再比较系统预设和个人风格”。这样你能更快确定日常生成应该默认走哪一种口吻。
             </div>
           </div>
+          <div className="studio-cluster-meta">
+            预设 {presets.length} · 我的 {userStyles.length}
+          </div>
+        </div>
 
-          <div className="grid gap-3 lg:grid-cols-2">
-            <div className="rounded-atelier border border-border bg-surface p-3">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-sm text-ink">系统预设</div>
-                <div className="text-xs text-subtext">只读</div>
+        <div className="rounded-atelier border border-border bg-surface p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="text-sm text-ink">项目默认</div>
+              <div className="mt-1 text-xs text-subtext" aria-label="project_default_style">
+                {defaultStyleLabel}
               </div>
-              <div className="mt-3 grid gap-2">
-                {presets.map((s) => (
-                  <div key={s.id} className="rounded-atelier border border-border bg-surface p-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div className="text-sm text-ink">{s.name}</div>
-                          <Badge tone="neutral">预设</Badge>
-                          {defaultStyleId === s.id ? <Badge tone="accent">默认</Badge> : null}
-                        </div>
-                        {s.description ? <div className="mt-1 text-xs text-subtext">{s.description}</div> : null}
-                      </div>
-                      <div className="flex shrink-0 items-center gap-2">
-                        <button
-                          className="btn btn-secondary"
-                          onClick={() => void setDefault(s.id)}
-                          disabled={defaultStyleId === s.id}
-                          type="button"
-                          aria-label={`设为默认:${s.name}`}
-                        >
-                          设为默认
-                        </button>
-                      </div>
-                    </div>
-                    <pre className="mt-3 max-h-40 overflow-auto rounded-atelier border border-border bg-canvas p-2 text-xs text-ink">
-                      {s.prompt_content || "（空）"}
-                    </pre>
-                  </div>
-                ))}
-                {presets.length === 0 ? <div className="text-xs text-subtext">（无预设）</div> : null}
+              <div className="mt-1 text-[11px] text-subtext">
+                未在「AI 生成」中手动选择风格时，会自动使用项目默认。
               </div>
             </div>
-
-            <div className="rounded-atelier border border-border bg-surface p-3">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-sm text-ink">我的风格</div>
-                <div className="text-xs text-subtext">可编辑</div>
-              </div>
-              <div className="mt-3 grid gap-2">
-                {userStyles.map((s) => (
-                  <div key={s.id} className="rounded-atelier border border-border bg-surface p-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div className="text-sm text-ink">{s.name}</div>
-                          <Badge tone="neutral">我的</Badge>
-                          {defaultStyleId === s.id ? <Badge tone="accent">默认</Badge> : null}
-                        </div>
-                        {s.description ? <div className="mt-1 text-xs text-subtext">{s.description}</div> : null}
-                      </div>
-                      <div className="flex shrink-0 flex-wrap items-center gap-2">
-                        <button
-                          className="btn btn-secondary"
-                          onClick={() => void setDefault(s.id)}
-                          disabled={defaultStyleId === s.id}
-                          type="button"
-                          aria-label={`设为默认:${s.name}`}
-                        >
-                          设为默认
-                        </button>
-                        <button className="btn btn-secondary" onClick={() => openEdit(s)} type="button">
-                          编辑
-                        </button>
-                        <button
-                          className="btn btn-secondary btn-icon"
-                          onClick={() => void deleteStyle(s)}
-                          type="button"
-                          aria-label={`删除:${s.name}`}
-                          title="删除"
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      </div>
-                    </div>
-                    <pre className="mt-3 max-h-40 overflow-auto rounded-atelier border border-border bg-canvas p-2 text-xs text-ink">
-                      {s.prompt_content || "（空）"}
-                    </pre>
-                  </div>
-                ))}
-                {userStyles.length === 0 ? <div className="text-xs text-subtext">（暂无自定义风格）</div> : null}
-              </div>
+            <div className="flex items-center gap-2">
+              <button
+                className="btn btn-secondary"
+                onClick={() => void setDefault(null)}
+                disabled={!defaultStyleId}
+                type="button"
+              >
+                取消默认
+              </button>
             </div>
           </div>
         </div>
-      </div>
+
+        <div className="grid gap-3 lg:grid-cols-2">
+          <div className="rounded-atelier border border-border bg-surface p-3">
+            <div className="studio-cluster-header">
+              <div>
+                <div className="text-sm text-ink">系统预设</div>
+                <div className="mt-1 text-xs text-subtext">适合快速试口吻、比对风格方向，只读不可改。</div>
+              </div>
+              <div className="text-xs text-subtext">只读</div>
+            </div>
+            <div className="mt-3 grid gap-2">
+              {presets.map((s) => (
+                <div key={s.id} className="rounded-atelier border border-border bg-surface p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="text-sm text-ink">{s.name}</div>
+                        <Badge tone="neutral">预设</Badge>
+                        {defaultStyleId === s.id ? <Badge tone="accent">默认</Badge> : null}
+                      </div>
+                      {s.description ? <div className="mt-1 text-xs text-subtext">{s.description}</div> : null}
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => void setDefault(s.id)}
+                        disabled={defaultStyleId === s.id}
+                        type="button"
+                        aria-label={`设为默认:${s.name}`}
+                      >
+                        设为默认
+                      </button>
+                    </div>
+                  </div>
+                  <pre className="mt-3 max-h-40 overflow-auto rounded-atelier border border-border bg-canvas p-2 text-xs text-ink">
+                    {s.prompt_content || "（空）"}
+                  </pre>
+                </div>
+              ))}
+              {presets.length === 0 ? <div className="text-xs text-subtext">（无预设）</div> : null}
+            </div>
+          </div>
+
+          <div className="rounded-atelier border border-border bg-surface p-3">
+            <div className="studio-cluster-header">
+              <div>
+                <div className="text-sm text-ink">我的风格</div>
+                <div className="mt-1 text-xs text-subtext">把长期要复用的写作要求沉淀下来，按项目或章节持续复用。</div>
+              </div>
+              <div className="text-xs text-subtext">可编辑</div>
+            </div>
+            <div className="mt-3 grid gap-2">
+              {userStyles.map((s) => (
+                <div key={s.id} className="rounded-atelier border border-border bg-surface p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="text-sm text-ink">{s.name}</div>
+                        <Badge tone="neutral">我的</Badge>
+                        {defaultStyleId === s.id ? <Badge tone="accent">默认</Badge> : null}
+                      </div>
+                      {s.description ? <div className="mt-1 text-xs text-subtext">{s.description}</div> : null}
+                    </div>
+                    <div className="flex shrink-0 flex-wrap items-center gap-2">
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => void setDefault(s.id)}
+                        disabled={defaultStyleId === s.id}
+                        type="button"
+                        aria-label={`设为默认:${s.name}`}
+                      >
+                        设为默认
+                      </button>
+                      <button className="btn btn-secondary" onClick={() => openEdit(s)} type="button">
+                        编辑
+                      </button>
+                      <button
+                        className="btn btn-secondary btn-icon"
+                        onClick={() => void deleteStyle(s)}
+                        type="button"
+                        aria-label={`删除:${s.name}`}
+                        title="删除"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  </div>
+                  <pre className="mt-3 max-h-40 overflow-auto rounded-atelier border border-border bg-canvas p-2 text-xs text-ink">
+                    {s.prompt_content || "（空）"}
+                  </pre>
+                </div>
+              ))}
+              {userStyles.length === 0 ? <div className="text-xs text-subtext">（暂无自定义风格）</div> : null}
+            </div>
+          </div>
+        </div>
+      </section>
 
       <Drawer
         open={modalOpen}
@@ -346,7 +419,9 @@ export function StylesPage() {
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <div className="font-content text-xl text-ink">{modalMode === "create" ? "新建风格" : "编辑风格"}</div>
-              <div className="mt-1 text-xs text-subtext">风格提示词（prompt_content）会在生成时按优先级注入。</div>
+              <div className="mt-1 text-xs text-subtext">
+                把你想长期复用的写作要求整理成清晰条目，保存后就可以作为项目默认或章节临时风格使用。
+              </div>
             </div>
             <button className="btn btn-secondary" onClick={() => setModalOpen(false)} type="button">
               关闭
@@ -385,14 +460,18 @@ export function StylesPage() {
               />
               <div className="mt-1 text-xs text-subtext">建议：用条目列出风格约束，避免冗长。</div>
             </label>
-            <details className="rounded-atelier border border-border bg-canvas px-3 py-2 text-xs text-subtext">
-              <summary className="cursor-pointer select-none">示例（点击展开）</summary>
+            <FeedbackDisclosure
+              className="rounded-atelier border border-border bg-canvas px-3 py-2 text-xs text-subtext"
+              summaryClassName="px-0 py-0 select-none"
+              bodyClassName="pt-2"
+              title="示例（点击展开）"
+            >
               <pre className="mt-2 whitespace-pre-wrap font-mono text-[11px] text-ink">{`写作要求：
 - 叙述视角：第三人称
 - 语气：克制、现实主义
 - 节奏：短句为主，少用感叹号
 - 禁止：出现“作为一个AI”之类自我表述`}</pre>
-            </details>
+            </FeedbackDisclosure>
 
             <div className="flex items-center justify-end gap-2">
               <button className="btn btn-secondary" onClick={() => setModalOpen(false)} type="button">

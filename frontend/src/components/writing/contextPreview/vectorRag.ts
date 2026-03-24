@@ -1,3 +1,11 @@
+import {
+  formatRagBackendLabel,
+  formatRagDisabledReason,
+  formatRerankMethodLabel,
+  formatVectorContentSourceLabel,
+  formatVectorProviderLabel,
+} from "../../../lib/vectorRagCopy";
+
 export type VectorSource = "worldbook" | "outline" | "chapter";
 
 export type VectorCandidate = {
@@ -21,7 +29,12 @@ export type VectorRerankObs = {
   applied: boolean;
   requested_method: string;
   method: string | null;
+  provider: string | null;
+  model: string | null;
   top_k: number;
+  hybrid_alpha: number | null;
+  hybrid_applied?: boolean;
+  after_rerank?: string[];
   reason: string | null;
   error_type: string | null;
   before: string[];
@@ -54,6 +67,12 @@ export type VectorRagQueryResult = {
   error?: string;
 };
 
+function humanizeDebugLabel(value: string, emptyLabel = "未返回") {
+  const trimmed = value.trim();
+  if (!trimmed) return emptyLabel;
+  return trimmed.replaceAll("_", " ");
+}
+
 function hasOwn<K extends string>(obj: unknown, key: K): obj is Record<K, unknown> {
   return typeof obj === "object" && obj !== null && Object.prototype.hasOwnProperty.call(obj, key);
 }
@@ -64,15 +83,22 @@ function normalizeRerankObs(raw: unknown): VectorRerankObs | null {
 
   const before = Array.isArray(o.before) ? o.before.map((v) => String(v)) : [];
   const after = Array.isArray(o.after) ? o.after.map((v) => String(v)) : [];
+  const afterRerank = Array.isArray(o.after_rerank) ? o.after_rerank.map((v) => String(v)) : undefined;
   const topK = typeof o.top_k === "number" ? o.top_k : Number(o.top_k);
   const timingMs = typeof o.timing_ms === "number" ? o.timing_ms : Number(o.timing_ms);
+  const hybridAlpha = typeof o.hybrid_alpha === "number" ? o.hybrid_alpha : Number(o.hybrid_alpha);
 
   return {
     enabled: Boolean(o.enabled),
     applied: Boolean(o.applied),
     requested_method: typeof o.requested_method === "string" ? o.requested_method : "",
     method: typeof o.method === "string" ? o.method : null,
+    provider: typeof o.provider === "string" ? o.provider : null,
+    model: typeof o.model === "string" ? o.model : null,
     top_k: Number.isFinite(topK) ? topK : 0,
+    hybrid_alpha: Number.isFinite(hybridAlpha) ? hybridAlpha : null,
+    hybrid_applied: typeof o.hybrid_applied === "boolean" ? o.hybrid_applied : undefined,
+    after_rerank: afterRerank,
     reason: typeof o.reason === "string" ? o.reason : null,
     error_type: typeof o.error_type === "string" ? o.error_type : null,
     before,
@@ -110,34 +136,45 @@ function rerankDelta(obs: VectorRerankObs): {
 export function formatRerankSummary(obs: VectorRerankObs): string {
   const delta = rerankDelta(obs);
   const comparedText = delta.compared ? `${delta.changedPositions}/${delta.compared}` : "-";
-  const methodText = obs.method ?? "-";
-  const reqText = obs.requested_method || "-";
-  const reasonText = obs.reason ?? "-";
-  const errText = obs.error_type ? ` | error:${obs.error_type}` : "";
+  const methodText = formatRerankMethodLabel(obs.method ?? "", "未返回");
+  const reqText = formatRerankMethodLabel(obs.requested_method || "", "未返回");
+  const reasonText = formatRagDisabledReason(obs.reason);
+  const providerText = obs.provider ? ` | 服务:${formatVectorProviderLabel(obs.provider, obs.provider)}` : "";
+  const modelText = obs.model ? ` | 模型:${obs.model}` : "";
+  const hybridText = typeof obs.hybrid_alpha === "number" ? ` | 混合权重:${obs.hybrid_alpha}` : "";
+  const hybridAppliedText =
+    typeof obs.hybrid_applied === "boolean" ? ` | 本次混合:${obs.hybrid_applied ? "已参与" : "未参与"}` : "";
+  const errText = obs.error_type ? ` | 错误类型:${obs.error_type}` : "";
   const changesText = delta.compared
-    ? ` | changed_in_top_k:${comparedText} | entered:${delta.entered} | left:${delta.left}`
+    ? ` | 前 ${delta.compared} 条中有 ${comparedText} 处顺序变化 | 新进入:${delta.entered} | 被替换:${delta.left}`
     : "";
-  return `enabled:${String(obs.enabled)} | applied:${String(obs.applied)} | reason:${reasonText} | requested:${reqText} | method:${methodText} | top_k:${obs.top_k} | timing_ms:${obs.timing_ms}${changesText}${errText}`;
+  return `${obs.enabled ? "已启用" : "未启用"} | ${obs.applied ? "本次已参与排序" : "本次未参与排序"} | 原因:${reasonText} | 请求方式:${reqText} | 实际方式:${methodText}${providerText}${modelText}${hybridText}${hybridAppliedText} | 候选数:${obs.top_k} | 耗时:${obs.timing_ms}ms${changesText}${errText}`;
 }
 
 export function formatHybridCounts(raw: unknown): string {
   if (!raw || typeof raw !== "object") return "-";
   const o = raw as Record<string, unknown>;
   const parts: string[] = [];
+  const labels: Record<string, string> = { vector: "向量", fts: "关键词", union: "合并后" };
   for (const key of ["vector", "fts", "union"] as const) {
     const v = o[key];
     const n = typeof v === "number" ? v : Number(v);
-    if (Number.isFinite(n)) parts.push(`${key}:${n}`);
+    if (Number.isFinite(n)) parts.push(`${labels[key]} ${n}`);
   }
   if (parts.length) return parts.join(" | ");
   const fallback = Object.entries(o)
     .map(([k, v]) => {
       const n = typeof v === "number" ? v : Number(v);
-      return Number.isFinite(n) ? `${k}:${n}` : null;
+      return Number.isFinite(n) ? `${humanizeDebugLabel(k, k)} ${n}` : null;
     })
     .filter((v): v is string => Boolean(v));
   return fallback.length ? fallback.join(" | ") : "-";
 }
+
+const OVERFILTER_ACTION_LABELS: Record<string, string> = {
+  relax_sources: "放宽资料来源限制",
+  expand_candidates: "扩大候选范围",
+};
 
 export function formatOverfilter(raw: unknown): string {
   if (!raw || typeof raw !== "object") return "-";
@@ -145,16 +182,88 @@ export function formatOverfilter(raw: unknown): string {
   const enabled = Boolean(o.enabled);
   const actions = Array.isArray(o.actions) ? o.actions.map((v) => String(v)).filter((v) => Boolean(v)) : [];
   const usedSources = Array.isArray(o.used_sources)
-    ? o.used_sources.map((v) => String(v)).filter((v) => Boolean(v))
+    ? o.used_sources
+        .map((v) => formatVectorContentSourceLabel(String(v), String(v)))
+        .filter((v) => Boolean(v))
     : [];
   const vectorK = typeof o.vector_k === "number" ? o.vector_k : Number(o.vector_k);
   const ftsK = typeof o.fts_k === "number" ? o.fts_k : Number(o.fts_k);
 
-  const parts = [`enabled:${String(enabled)}`];
-  if (actions.length) parts.push(`actions:${actions.join(",")}`);
-  if (usedSources.length) parts.push(`used_sources:${usedSources.join(",")}`);
-  if (Number.isFinite(vectorK)) parts.push(`vector_k:${vectorK}`);
-  if (Number.isFinite(ftsK)) parts.push(`fts_k:${ftsK}`);
+  const parts = [enabled ? "已启用" : "未启用"];
+  if (actions.length) {
+    parts.push(
+      `保护动作:${actions
+        .map((value) => OVERFILTER_ACTION_LABELS[value] ?? humanizeDebugLabel(value, value))
+        .join("、")}`,
+    );
+  }
+  if (usedSources.length) parts.push(`实际来源:${usedSources.join("、")}`);
+  if (Number.isFinite(vectorK)) parts.push(`向量候选:${vectorK}`);
+  if (Number.isFinite(ftsK)) parts.push(`关键词候选:${ftsK}`);
+  return parts.join(" | ");
+}
+
+export function formatVectorSourceSummary(sources: VectorSource[]) {
+  if (!sources.length) return "本次还没有选择资料来源";
+  return `本次会优先检查：${sources.map((source) => formatVectorContentSourceLabel(source, source)).join("、")}`;
+}
+
+function formatDroppedReasonSummary(droppedByReason: Record<string, number>) {
+  const parts = Object.entries(droppedByReason)
+    .map(([reason, count]) => `${humanizeDebugLabel(reason, reason)} ${count}`)
+    .slice(0, 3);
+  return parts.length ? ` | 主要舍弃原因:${parts.join("、")}` : "";
+}
+
+export function formatVectorCountsSummary(result: Pick<VectorRagQueryResult, "counts" | "candidates" | "final" | "dropped">) {
+  if (result.counts) {
+    return `候选 ${result.counts.candidates_total} 条 | 返回 ${result.counts.candidates_returned} 条 | 覆盖 ${result.counts.unique_sources} 类资料 | 最终入选 ${result.counts.final_selected} 条 | 舍弃 ${result.counts.dropped_total} 条${formatDroppedReasonSummary(result.counts.dropped_by_reason)}`;
+  }
+  return `候选 ${result.candidates.length} 条 | 最终入选 ${result.final.chunks.length} 条 | 舍弃 ${result.dropped.length} 条`;
+}
+
+const TIMING_LABELS: Record<string, string> = {
+  total: "总耗时",
+  vector: "向量检索",
+  fts: "关键词检索",
+  rerank: "重排",
+  hybrid: "混合召回",
+  preprocess: "整理检索语句",
+  normalize_query: "整理检索语句",
+  query_normalize: "整理检索语句",
+  format_prompt: "整理提示词片段",
+};
+
+export function formatVectorTimingSummary(timingsMs: Record<string, number>) {
+  const entries = Object.entries(timingsMs)
+    .filter(([, value]) => Number.isFinite(value))
+    .slice(0, 5);
+  if (!entries.length) return "耗时明细暂未返回";
+  return entries
+    .map(([key, value]) => `${TIMING_LABELS[key] ?? humanizeDebugLabel(key, key)} ${value}ms`)
+    .join(" | ");
+}
+
+export function formatVectorHybridSummary(hybrid: VectorHybridObs | null, backend: string | null) {
+  const backendText = formatRagBackendLabel(backend, "未返回检索后端");
+  if (!hybrid) return `混合召回信息暂未返回 | 检索后端:${backendText}`;
+  return `${hybrid.enabled ? "混合召回已启用" : "混合召回未启用"} | 命中规模:${formatHybridCounts(hybrid.counts)} | 过筛保护:${formatOverfilter(hybrid.overfilter)} | 检索后端:${backendText}`;
+}
+
+export function formatVectorQueryStatusSummary(result: Pick<VectorRagQueryResult, "enabled" | "disabled_reason" | "error" | "final">) {
+  if (result.enabled) {
+    return `资料召回可用，本次带回了 ${result.final.chunks.length} 条可注入的参考片段。`;
+  }
+  const reasonText = formatRagDisabledReason(result.disabled_reason);
+  const errorText = result.error ? `；附加信息：${result.error}` : "";
+  return `资料召回暂不可用，原因：${reasonText}${errorText}`;
+}
+
+export function formatVectorCandidateLabel(source: string, chunkIndex: number | null, title: string, sourceId: string) {
+  const parts = [formatVectorContentSourceLabel(source, "片段")];
+  if (chunkIndex != null && Number.isFinite(chunkIndex)) parts.push(`片段 #${chunkIndex}`);
+  if (title) parts.push(title);
+  if (sourceId) parts.push(sourceId);
   return parts.join(" | ");
 }
 

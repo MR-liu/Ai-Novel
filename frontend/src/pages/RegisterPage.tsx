@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
 
 import { useAuth } from "../contexts/auth";
+import { FeedbackCallout } from "../components/ui/Feedback";
 import { UI_COPY } from "../lib/uiCopy";
 import { ApiError } from "../services/apiClient";
 import { fetchAuthProviders } from "../services/authProviders";
@@ -124,7 +125,11 @@ export function RegisterPage() {
                     required
                   />
                 </label>
-                {passwordMismatch ? <div className="text-xs text-danger">两次输入的密码不一致</div> : null}
+                {passwordMismatch ? (
+                  <FeedbackCallout className="text-xs" tone="danger" title="请再次确认密码">
+                    两次输入的密码不一致
+                  </FeedbackCallout>
+                ) : null}
               </div>
 
               <div className="flex items-center justify-end gap-2">

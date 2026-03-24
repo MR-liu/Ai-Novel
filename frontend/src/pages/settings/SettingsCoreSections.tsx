@@ -1,5 +1,6 @@
 import type { Dispatch, RefObject, SetStateAction } from "react";
 
+import { FeedbackCallout, FeedbackDisclosure, FeedbackEmptyState } from "../../components/ui/Feedback";
 import { humanizeMemberRole } from "../../lib/humanize";
 import type { Project, ProjectSettings } from "../../types";
 
@@ -192,7 +193,7 @@ export function SettingsCoreSections(props: SettingsCoreSectionsProps) {
               }
               type="checkbox"
             />
-            角色卡：自动更新（characters_auto_update）
+            角色卡：自动补全与回写（characters_auto_update）
           </label>
 
           <label className="flex items-center gap-2 text-sm text-ink">
@@ -204,7 +205,7 @@ export function SettingsCoreSections(props: SettingsCoreSectionsProps) {
               }
               type="checkbox"
             />
-            剧情记忆：自动分析并写入（plot_auto_update）
+            剧情记忆：自动整理并回写（plot_auto_update）
           </label>
 
           <label className="flex items-center gap-2 text-sm text-ink">
@@ -214,7 +215,7 @@ export function SettingsCoreSections(props: SettingsCoreSectionsProps) {
               onChange={(e) => setSettingsForm((value) => ({ ...value, auto_update_graph_enabled: e.target.checked }))}
               type="checkbox"
             />
-            图谱：自动更新（graph_auto_update）
+            关系图：自动回写（graph_auto_update）
           </label>
 
           <label className="flex items-center gap-2 text-sm text-ink">
@@ -224,7 +225,7 @@ export function SettingsCoreSections(props: SettingsCoreSectionsProps) {
               onChange={(e) => setSettingsForm((value) => ({ ...value, auto_update_vector_enabled: e.target.checked }))}
               type="checkbox"
             />
-            向量索引：自动重建（vector_rebuild）
+            知识库索引：自动重建（vector_rebuild）
           </label>
 
           <label className="flex items-center gap-2 text-sm text-ink">
@@ -234,7 +235,7 @@ export function SettingsCoreSections(props: SettingsCoreSectionsProps) {
               onChange={(e) => setSettingsForm((value) => ({ ...value, auto_update_search_enabled: e.target.checked }))}
               type="checkbox"
             />
-            搜索索引：自动重建（search_rebuild）
+            搜索索引：自动更新（search_rebuild）
           </label>
 
           <label className="flex items-center gap-2 text-sm text-ink">
@@ -246,7 +247,7 @@ export function SettingsCoreSections(props: SettingsCoreSectionsProps) {
               }
               type="checkbox"
             />
-            分形记忆：自动重建（fractal_rebuild）
+            长期记忆摘要：自动重建（fractal_rebuild）
           </label>
 
           <label className="flex items-center gap-2 text-sm text-ink">
@@ -256,7 +257,7 @@ export function SettingsCoreSections(props: SettingsCoreSectionsProps) {
               onChange={(e) => setSettingsForm((value) => ({ ...value, auto_update_tables_enabled: e.target.checked }))}
               type="checkbox"
             />
-            数值表格：自动更新（table_ai_update）
+            表格资料：自动更新（table_ai_update）
           </label>
         </div>
 
@@ -276,8 +277,8 @@ export function SettingsCoreSections(props: SettingsCoreSectionsProps) {
         </div>
       </section>
 
-      <details className="panel" aria-label="上下文优化（Context Optimizer）">
-        <summary className="ui-focus-ring ui-transition-fast cursor-pointer select-none p-6">
+      <section className="panel p-6" aria-label="上下文优化（Context Optimizer）" role="region">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="grid gap-1">
             <div className="font-content text-xl text-ink">上下文优化（Context Optimizer）</div>
             <div className="text-xs text-subtext">
@@ -287,9 +288,24 @@ export function SettingsCoreSections(props: SettingsCoreSectionsProps) {
               {SETTINGS_COPY.contextOptimizer.status(baselineSettings.context_optimizer_enabled)}
             </div>
           </div>
-        </summary>
+          <span className="manuscript-chip">
+            {baselineSettings.context_optimizer_enabled ? "当前默认开启" : "当前默认关闭"}
+          </span>
+        </div>
 
-        <div className="px-6 pb-6 pt-0">
+        <FeedbackDisclosure
+          className="mt-4 rounded-atelier border border-border bg-canvas p-4"
+          summaryClassName="px-0 py-0"
+          bodyClassName="pt-4"
+          title={
+            <div className="grid gap-1">
+              <div className="text-sm text-ink">展开上下文优化设置</div>
+              <div className="text-xs text-subtext">
+                这项能力更偏高级调优，适合在注入过长、重复或阅读性差时开启；平时如果写作链路稳定，也可以先保持简单。
+              </div>
+            </div>
+          }
+        >
           <div className="mt-4 grid gap-2">
             <label className="flex items-center gap-2 text-sm text-ink">
               <input
@@ -302,13 +318,15 @@ export function SettingsCoreSections(props: SettingsCoreSectionsProps) {
               />
               启用 ContextOptimizer（影响 Prompt 预览与生成）
             </label>
-            <div className="text-[11px] text-subtext">提示：写作页「上下文预览」会显示优化摘要与 diff。</div>
+            <FeedbackCallout className="text-xs" title="启用后会在哪里看到效果">
+              写作页「上下文预览」会显示优化摘要与 diff。
+            </FeedbackCallout>
           </div>
-        </div>
-      </details>
+        </FeedbackDisclosure>
+      </section>
 
-      <details className="panel" aria-label="协作成员（Project Memberships）">
-        <summary className="ui-focus-ring ui-transition-fast cursor-pointer select-none p-6">
+      <section className="panel p-6" aria-label="协作成员（Project Memberships）" role="region">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="grid gap-1">
             <div className="font-content text-xl text-ink">协作成员（Project Memberships）</div>
             <div className="text-xs text-subtext">
@@ -316,9 +334,24 @@ export function SettingsCoreSections(props: SettingsCoreSectionsProps) {
             </div>
             <div className="text-xs text-subtext">owner: {baselineProject.owner_user_id}</div>
           </div>
-        </summary>
+          <span className="manuscript-chip">
+            {canManageMemberships ? "当前可管理成员" : "当前仅可查看权限说明"}
+          </span>
+        </div>
 
-        <div className="px-6 pb-6 pt-0">
+        <FeedbackDisclosure
+          className="mt-4 rounded-atelier border border-border bg-canvas p-4"
+          summaryClassName="px-0 py-0"
+          bodyClassName="pt-4"
+          title={
+            <div className="grid gap-1">
+              <div className="text-sm text-ink">展开协作成员管理</div>
+              <div className="text-xs text-subtext">
+                只有项目 owner 能邀请、改角色和移除成员；如果你只是协作者，这里主要用于确认当前权限范围。
+              </div>
+            </div>
+          }
+        >
           {canManageMemberships ? (
             <div className="mt-4 grid gap-4">
               <div className="flex flex-wrap items-end gap-3">
@@ -421,8 +454,12 @@ export function SettingsCoreSections(props: SettingsCoreSectionsProps) {
                     })}
                     {memberships.length === 0 ? (
                       <tr>
-                        <td className="px-3 py-3 text-xs text-subtext" colSpan={4}>
-                          暂无成员数据
+                        <td className="px-3 py-3" colSpan={4}>
+                          <FeedbackEmptyState
+                            variant="compact"
+                            title="当前还没有协作成员"
+                            description="目前只有 owner 自己；如果你准备多人协作，可以先邀请 editor 或 viewer。"
+                          />
                         </td>
                       </tr>
                     ) : null}
@@ -431,12 +468,12 @@ export function SettingsCoreSections(props: SettingsCoreSectionsProps) {
               </div>
             </div>
           ) : (
-            <div className="mt-4 text-xs text-subtext">
+            <FeedbackCallout className="mt-4 text-xs" title="你当前没有成员管理权限">
               仅项目 owner（{baselineProject.owner_user_id}）可管理成员；当前用户：{currentUserId}。
-            </div>
+            </FeedbackCallout>
           )}
-        </div>
-      </details>
+        </FeedbackDisclosure>
+      </section>
     </>
   );
 }

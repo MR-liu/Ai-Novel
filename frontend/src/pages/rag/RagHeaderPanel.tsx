@@ -1,6 +1,8 @@
 import { Link } from "react-router-dom";
 
+import { buildStudioAiPath } from "../../lib/projectRoutes";
 import { UI_COPY } from "../../lib/uiCopy";
+import { formatIndexStateLabel, formatRagDisabledReason } from "../../lib/vectorRagCopy";
 import { formatIsoToLocal } from "./utils";
 
 export function RagHeaderPanel(props: {
@@ -74,7 +76,7 @@ export function RagHeaderPanel(props: {
           {projectId ? (
             <Link
               className="btn btn-secondary"
-              to={`/projects/${projectId}/prompts#rag-config`}
+              to={`${buildStudioAiPath(projectId, "models")}#rag-config`}
               aria-label={`${UI_COPY.rag.settings} (rag_settings)`}
             >
               {UI_COPY.rag.settings}
@@ -86,8 +88,7 @@ export function RagHeaderPanel(props: {
       <div className="mt-3 rounded-atelier border border-border bg-canvas p-3 text-xs">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="text-subtext">
-            索引过期（dirty）: {vectorIndexDirty === null ? "loading…" : String(vectorIndexDirty)} |
-            上次构建（last_build_at）: {lastVectorBuildAt ?? "-"}
+            索引状态：{formatIndexStateLabel(vectorIndexDirty)} | 上次更新：{lastVectorBuildAt ?? "-"}
             {lastVectorBuildAt ? `（${formatIsoToLocal(lastVectorBuildAt)}）` : ""}
           </div>
           {vectorIndexDirty === null ? (
@@ -95,14 +96,14 @@ export function RagHeaderPanel(props: {
           ) : vectorIndexDirty ? (
             vectorEnabled === false ? (
               <div className="text-ink">
-                索引已过期，但向量服务未启用（disabled_reason: {vectorDisabledReason ?? "-"}）。请先在{" "}
-                {UI_COPY.rag.settings} 配置 向量化（Embedding），再 {UI_COPY.rag.rebuild}。
+                索引需要更新，但资料召回服务还不可用（原因：{formatRagDisabledReason(vectorDisabledReason)}）。请先打开
+                {UI_COPY.rag.settings}，确认召回服务可用后再 {UI_COPY.rag.rebuild}。
               </div>
             ) : (
-              <div className="text-ink">索引已过期：建议点击右上角 “{UI_COPY.rag.rebuildRecommended}” 重新构建。</div>
+              <div className="text-ink">索引需要更新：建议点击右上角“{UI_COPY.rag.rebuildRecommended}”同步最新资料。</div>
             )
           ) : (
-            <div className="text-subtext">索引为 clean，无需重建。</div>
+            <div className="text-subtext">索引已经是最新状态，当前无需重建。</div>
           )}
         </div>
       </div>

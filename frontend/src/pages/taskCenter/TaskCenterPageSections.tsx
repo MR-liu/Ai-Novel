@@ -2,7 +2,9 @@ import { Link } from "react-router-dom";
 
 import { DebugDetails } from "../../components/atelier/DebugPageShell";
 import { Drawer } from "../../components/ui/Drawer";
+import { FeedbackCallout, FeedbackDisclosure, FeedbackEmptyState } from "../../components/ui/Feedback";
 import { humanizeChangeSetStatus, humanizeTaskStatus } from "../../lib/humanize";
+import { buildProjectWritePath, buildStudioSystemPath } from "../../lib/projectRoutes";
 import { UI_COPY } from "../../lib/uiCopy";
 import type { ProjectTaskRuntime } from "../../services/projectTaskRuntime";
 
@@ -80,7 +82,9 @@ export function TaskCenterHealthBanner(props: TaskCenterHealthBannerProps) {
         ) : null}
       </div>
       {props.health.data.effective_backend === "inline" ? (
-        <div className="mt-1 text-warning">{TASK_CENTER_COPY.queueInlineWarning}</div>
+        <FeedbackCallout className="mt-2 text-xs" tone="warning" title="当前仍在使用 inline 后端">
+          {TASK_CENTER_COPY.queueInlineWarning}
+        </FeedbackCallout>
       ) : null}
       {props.health.data.worker_hint ? <div className="mt-1">{props.health.data.worker_hint}</div> : null}
       {props.health.requestId ? (
@@ -107,17 +111,19 @@ export function TaskCenterHelpSection(props: TaskCenterHelpSectionProps) {
         {props.projectId ? (
           <div>
             {TASK_CENTER_COPY.usageLinksPrefix}{" "}
-            <Link className="underline" to={`/projects/${props.projectId}/structured-memory`}>
+            <Link className="underline" to={buildStudioSystemPath(props.projectId, "structured-memory")}>
               {TASK_CENTER_COPY.helpStructuredMemory}
             </Link>{" "}
             与{" "}
-            <Link className="underline" to={`/projects/${props.projectId}/writing`}>
+            <Link className="underline" to={buildProjectWritePath(props.projectId)}>
               {TASK_CENTER_COPY.helpWriting}
             </Link>{" "}
             {TASK_CENTER_COPY.helpUsageSuffix}
           </div>
         ) : null}
-        <div className="text-warning">{UI_COPY.taskCenter.riskHint}</div>
+        <FeedbackCallout className="text-xs" tone="warning" title="风险提醒">
+          {UI_COPY.taskCenter.riskHint}
+        </FeedbackCallout>
       </div>
     </DebugDetails>
   );
@@ -186,7 +192,12 @@ export function TaskCenterChangeSetsSection(props: TaskCenterChangeSetsSectionPr
 
       {props.loading ? <div className="mt-3 text-sm text-subtext">{TASK_CENTER_COPY.loading}</div> : null}
       {!props.loading && props.items.length === 0 ? (
-        <div className="mt-3 text-sm text-subtext">{TASK_CENTER_COPY.changeSetsEmpty}</div>
+        <FeedbackEmptyState
+          className="mt-3"
+          variant="compact"
+          title="还没有变更提议"
+          description={TASK_CENTER_COPY.changeSetsEmpty}
+        />
       ) : null}
 
       <div className="mt-3 grid gap-2">
@@ -297,7 +308,12 @@ export function TaskCenterTasksSection(props: TaskCenterTasksSectionProps) {
 
       {props.loading ? <div className="mt-3 text-sm text-subtext">{TASK_CENTER_COPY.loading}</div> : null}
       {!props.loading && props.items.length === 0 ? (
-        <div className="mt-3 text-sm text-subtext">{TASK_CENTER_COPY.tasksEmpty}</div>
+        <FeedbackEmptyState
+          className="mt-3"
+          variant="compact"
+          title="还没有记忆任务"
+          description={TASK_CENTER_COPY.tasksEmpty}
+        />
       ) : null}
 
       <div className="mt-3 grid gap-2">
@@ -322,9 +338,9 @@ export function TaskCenterTasksSection(props: TaskCenterTasksSectionProps) {
                   />
                 ) : null}
                 {item.status === "failed" ? (
-                  <div className="mt-1 truncate text-xs text-danger">
+                  <FeedbackCallout className="mt-2 text-xs" tone="danger" title="任务失败摘要">
                     {formatTaskCenterErrorText(item.error_type, item.error_message)}
-                  </div>
+                  </FeedbackCallout>
                 ) : null}
               </div>
               <StatusBadge status={item.status} kind="task" />
@@ -408,7 +424,12 @@ export function TaskCenterProjectTasksSection(props: TaskCenterProjectTasksSecti
 
       {props.loading ? <div className="mt-3 text-sm text-subtext">{TASK_CENTER_COPY.loading}</div> : null}
       {!props.loading && props.items.length === 0 ? (
-        <div className="mt-3 text-sm text-subtext">{TASK_CENTER_COPY.projectTasksEmpty}</div>
+        <FeedbackEmptyState
+          className="mt-3"
+          variant="compact"
+          title="还没有项目后台任务"
+          description={TASK_CENTER_COPY.projectTasksEmpty}
+        />
       ) : null}
 
       <div className="mt-3 grid gap-2">
@@ -431,9 +452,9 @@ export function TaskCenterProjectTasksSection(props: TaskCenterProjectTasksSecti
                   </div>
                 ) : null}
                 {item.status === "failed" ? (
-                  <div className="mt-1 truncate text-xs text-danger">
+                  <FeedbackCallout className="mt-2 text-xs" tone="danger" title="任务失败摘要">
                     {formatTaskCenterErrorText(item.error_type, item.error_message)}
-                  </div>
+                  </FeedbackCallout>
                 ) : null}
               </div>
 
@@ -504,7 +525,44 @@ export type TaskCenterDetailDrawerProps = {
   onRollbackChangeSet: (changeSetId: string) => void;
 };
 
+function getSelectedItemStatus(selected: TaskCenterSelectedItem): string {
+  if (!selected) return "unknown";
+  return String(selected.item.status || "unknown");
+}
+
+function getSelectedItemScope(selected: TaskCenterSelectedItem): string {
+  if (!selected) return "未选择";
+  if (selected.kind === "change_set") return "变更提议";
+  if (selected.kind === "task") return "记忆任务";
+  return "项目后台任务";
+}
+
+function getSelectedItemNextStep(props: TaskCenterDetailDrawerProps): string {
+  const selected = props.selected;
+  if (!selected) return "请先从左侧列表选择一项。";
+  const status = getSelectedItemStatus(selected);
+  if (selected.kind === "change_set") {
+    if (status === "proposed") return "这份提议尚未应用，先看摘要与原始数据，再决定是否落库。";
+    if (status === "applied") return "这份提议已经落地，下一步更适合回写作链路确认结果是否符合预期。";
+    if (status === "failed") return "这份提议处理失败，先看 request_id 和原始数据，再判断是否需要重跑。";
+    return "先确认这份变更提议现在处于什么状态，再决定是否继续应用或回滚。";
+  }
+  if (selected.kind === "task") {
+    if (status === "failed") return "先看失败原因和修复建议，再判断是不是需要回到变更集重新发起。";
+    if (status === "running" || status === "queued") return "任务仍在进行中，先看时间和状态，确认是不是还需要继续等待。";
+    return "先确认这项记忆任务是否真正完成，再决定是否去写作页核对落地结果。";
+  }
+  if (status === "failed") return "先看失败原因，再决定重试、取消，还是继续排查运行现场。";
+  if (status === "queued" || status === "running") return "任务仍在推进中，先看运行现场和时间线，再决定是否介入。";
+  if (props.selectedProjectTaskRunId) return "任务已经落到运行记录，下一步适合打开运行记录确认产出是否可用。";
+  return "先看结果落点和运行现场，确认这项后台任务到底做完了什么。";
+}
+
 export function TaskCenterDetailDrawer(props: TaskCenterDetailDrawerProps) {
+  const selectedStatus = getSelectedItemStatus(props.selected);
+  const selectedScope = getSelectedItemScope(props.selected);
+  const nextStepText = getSelectedItemNextStep(props);
+
   return (
     <Drawer
       open={Boolean(props.selected)}
@@ -535,6 +593,25 @@ export function TaskCenterDetailDrawer(props: TaskCenterDetailDrawerProps) {
           </button>
         </div>
       </div>
+
+      {props.selected ? (
+        <section className="manuscript-status-band mt-5">
+          <div className="grid gap-1">
+            <div className="text-sm text-ink">{nextStepText}</div>
+            <div className="text-xs text-subtext">建议顺序：先判断状态，再看错误或结果，最后再决定重试、回滚或回到写作链路核对。</div>
+          </div>
+          <div className="manuscript-status-list">
+            <span className="manuscript-chip">当前范围：{selectedScope}</span>
+            <span className="manuscript-chip">当前状态：{selectedStatus}</span>
+            {props.selected.kind === "project_task" && props.selectedProjectTaskRunId ? (
+              <span className="manuscript-chip">已关联运行记录</span>
+            ) : null}
+            {props.selected.kind === "project_task" && props.selectedProjectTaskChangeSetId ? (
+              <span className="manuscript-chip">已关联变更集</span>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
 
       {props.selected?.kind === "change_set" ? (
         <div className="mt-5 grid gap-3">
@@ -567,8 +644,12 @@ export function TaskCenterDetailDrawer(props: TaskCenterDetailDrawerProps) {
               </div>
             </div>
           </section>
-          <details className="rounded-atelier border border-border bg-surface p-3">
-            <summary className="cursor-pointer select-none text-sm text-ink">{TASK_CENTER_COPY.detailRawJson}</summary>
+          <FeedbackDisclosure
+            className="rounded-atelier border border-border bg-surface px-3 py-2"
+            summaryClassName="text-sm text-ink"
+            bodyClassName="pt-3"
+            title={TASK_CENTER_COPY.detailRawJson}
+          >
             <div className="mt-3 flex items-center justify-end">
               <button className="btn btn-secondary btn-sm" onClick={props.onCopyRawJson} type="button">
                 {TASK_CENTER_COPY.detailCopyDebug}
@@ -577,7 +658,7 @@ export function TaskCenterDetailDrawer(props: TaskCenterDetailDrawerProps) {
             <pre className="mt-2 whitespace-pre-wrap break-words rounded-atelier border border-border bg-canvas p-3 text-xs text-ink">
               {safeJsonStringify(props.selected.item)}
             </pre>
-          </details>
+          </FeedbackDisclosure>
         </div>
       ) : null}
 
@@ -627,9 +708,9 @@ export function TaskCenterDetailDrawer(props: TaskCenterDetailDrawerProps) {
             <div className="text-sm text-ink">{TASK_CENTER_COPY.detailError}</div>
             {props.selected.item.status === "failed" ? (
               <div className="mt-2 grid gap-2 text-xs text-subtext">
-                <div className="text-danger">
+                <FeedbackCallout tone="danger" title="记忆任务执行失败">
                   {formatTaskCenterErrorText(props.selected.item.error_type, props.selected.item.error_message)}
-                </div>
+                </FeedbackCallout>
                 {extractHowToFix(props.selected.item.error).length > 0 ? (
                   <ul className="list-disc pl-5 text-[11px] text-subtext">
                     {extractHowToFix(props.selected.item.error).map((item, idx) => (
@@ -637,15 +718,24 @@ export function TaskCenterDetailDrawer(props: TaskCenterDetailDrawerProps) {
                     ))}
                   </ul>
                 ) : null}
-                <details className="rounded-atelier border border-border bg-canvas p-2">
-                  <summary className="cursor-pointer select-none text-xs text-subtext">error（脱敏）</summary>
+                <FeedbackDisclosure
+                  className="rounded-atelier border border-border bg-canvas px-2 py-2"
+                  summaryClassName="text-xs text-subtext"
+                  bodyClassName="pt-2"
+                  title="error（脱敏）"
+                >
                   <pre className="mt-2 whitespace-pre-wrap break-words text-xs text-ink">
                     {safeJsonStringify(props.selected.item.error ?? null)}
                   </pre>
-                </details>
+                </FeedbackDisclosure>
               </div>
             ) : (
-              <div className="mt-2 text-xs text-subtext">{TASK_CENTER_COPY.detailNoError}</div>
+              <FeedbackEmptyState
+                className="mt-2"
+                variant="compact"
+                title="当前没有错误信息"
+                description={TASK_CENTER_COPY.detailNoError}
+              />
             )}
           </section>
         </div>
@@ -777,9 +867,9 @@ export function TaskCenterDetailDrawer(props: TaskCenterDetailDrawerProps) {
             <div className="text-sm text-ink">{TASK_CENTER_COPY.detailError}</div>
             {props.selected.item.status === "failed" ? (
               <div className="mt-2 grid gap-2 text-xs text-subtext">
-                <div className="text-danger">
+                <FeedbackCallout tone="danger" title="项目任务执行失败">
                   {formatTaskCenterErrorText(props.selected.item.error_type, props.selected.item.error_message)}
-                </div>
+                </FeedbackCallout>
                 {extractHowToFix(props.selected.item.error).length > 0 ? (
                   <ul className="list-disc pl-5 text-[11px] text-subtext">
                     {extractHowToFix(props.selected.item.error).map((item, idx) => (
@@ -789,7 +879,12 @@ export function TaskCenterDetailDrawer(props: TaskCenterDetailDrawerProps) {
                 ) : null}
               </div>
             ) : (
-              <div className="mt-2 text-xs text-subtext">{TASK_CENTER_COPY.detailNoError}</div>
+              <FeedbackEmptyState
+                className="mt-2"
+                variant="compact"
+                title="当前没有错误信息"
+                description={TASK_CENTER_COPY.detailNoError}
+              />
             )}
           </section>
 
@@ -840,32 +935,48 @@ export function TaskCenterDetailDrawer(props: TaskCenterDetailDrawerProps) {
           <section className="rounded-atelier border border-border bg-surface p-3" aria-label="projecttask_results">
             <div className="text-sm text-ink">{TASK_CENTER_COPY.detailResults}</div>
             <div className="mt-2 grid gap-2">
-              <details className="rounded-atelier border border-border bg-canvas p-2">
-                <summary className="cursor-pointer select-none text-xs text-subtext">params（脱敏）</summary>
+              <FeedbackDisclosure
+                className="rounded-atelier border border-border bg-canvas px-2 py-2"
+                summaryClassName="text-xs text-subtext"
+                bodyClassName="pt-2"
+                title="params（脱敏）"
+              >
                 <pre className="mt-2 whitespace-pre-wrap break-words text-xs text-ink">
                   {safeJsonStringify(props.selected.item.params ?? null)}
                 </pre>
-              </details>
-              <details className="rounded-atelier border border-border bg-canvas p-2">
-                <summary className="cursor-pointer select-none text-xs text-subtext">result</summary>
+              </FeedbackDisclosure>
+              <FeedbackDisclosure
+                className="rounded-atelier border border-border bg-canvas px-2 py-2"
+                summaryClassName="text-xs text-subtext"
+                bodyClassName="pt-2"
+                title="result"
+              >
                 <pre className="mt-2 whitespace-pre-wrap break-words text-xs text-ink">
                   {safeJsonStringify(props.selected.item.result ?? null)}
                 </pre>
-              </details>
-              <details className="rounded-atelier border border-border bg-canvas p-2">
-                <summary className="cursor-pointer select-none text-xs text-subtext">error（脱敏）</summary>
+              </FeedbackDisclosure>
+              <FeedbackDisclosure
+                className="rounded-atelier border border-border bg-canvas px-2 py-2"
+                summaryClassName="text-xs text-subtext"
+                bodyClassName="pt-2"
+                title="error（脱敏）"
+              >
                 <pre className="mt-2 whitespace-pre-wrap break-words text-xs text-ink">
                   {safeJsonStringify(props.selected.item.error ?? null)}
                 </pre>
-              </details>
+              </FeedbackDisclosure>
             </div>
           </section>
         </div>
       ) : null}
 
       {props.selected ? (
-        <details className="mt-5 rounded-atelier border border-border bg-surface p-3">
-          <summary className="cursor-pointer select-none text-sm text-ink">{TASK_CENTER_COPY.detailRawJson}</summary>
+        <FeedbackDisclosure
+          className="mt-5 rounded-atelier border border-border bg-surface px-3 py-2"
+          summaryClassName="text-sm text-ink"
+          bodyClassName="pt-3"
+          title={TASK_CENTER_COPY.detailRawJson}
+        >
           <div className="mt-3 flex items-center justify-end">
             <button className="btn btn-secondary btn-sm" onClick={props.onCopyRawJson} type="button">
               {TASK_CENTER_COPY.detailCopyDebug}
@@ -874,7 +985,7 @@ export function TaskCenterDetailDrawer(props: TaskCenterDetailDrawerProps) {
           <pre className="mt-2 whitespace-pre-wrap break-words rounded-atelier border border-border bg-canvas p-3 text-xs text-ink">
             {safeJsonStringify(props.selected.item)}
           </pre>
-        </details>
+        </FeedbackDisclosure>
       ) : null}
     </Drawer>
   );

@@ -6,9 +6,14 @@ import { ProjectProviderGuard } from "./components/layout/ProjectProviderGuard";
 import { AppShell } from "./components/layout/AppShell";
 import { ConfirmProvider } from "./components/ui/ConfirmProvider";
 import { ToastProvider } from "./components/ui/ToastProvider";
+import { AppModeProvider } from "./contexts/AppModeContext";
 import { AuthProvider } from "./contexts/AuthContext";
 import { ProjectsProvider } from "./contexts/ProjectsContext";
 import { importWithChunkRetry } from "./lib/lazyImportRetry";
+import { LEGACY_PROJECT_REDIRECTS } from "./lib/legacyProjectRedirects";
+import { buildProjectHomePath } from "./lib/projectRoutes";
+import { GlobalProjectImportPage } from "./pages/GlobalProjectImportPage";
+import { LegacyProjectRouteRedirect } from "./pages/LegacyProjectRouteRedirect";
 import { RouteErrorPage } from "./pages/RouteErrorPage";
 
 const LoginPage = lazy(async () => {
@@ -31,19 +36,14 @@ const AdminUsersPage = lazy(async () => {
   return { default: mod.AdminUsersPage };
 });
 
-const ProjectWizardPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/ProjectWizardPage"));
-  return { default: mod.ProjectWizardPage };
+const ProjectHomePage = lazy(async () => {
+  const mod = await importWithChunkRetry(() => import("./pages/ProjectHomePage"));
+  return { default: mod.ProjectHomePage };
 });
 
-const SettingsPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/SettingsPage"));
-  return { default: mod.SettingsPage };
-});
-
-const CharactersPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/CharactersPage"));
-  return { default: mod.CharactersPage };
+const StoryBiblePage = lazy(async () => {
+  const mod = await importWithChunkRetry(() => import("./pages/StoryBiblePage"));
+  return { default: mod.StoryBiblePage };
 });
 
 const OutlinePage = lazy(async () => {
@@ -56,54 +56,9 @@ const WritingPage = lazy(async () => {
   return { default: mod.WritingPage };
 });
 
-const TaskCenterPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/TaskCenterPage"));
-  return { default: mod.TaskCenterPage };
-});
-
-const StructuredMemoryPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/StructuredMemoryPage"));
-  return { default: mod.StructuredMemoryPage };
-});
-
-const NumericTablesPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/NumericTablesPage"));
-  return { default: mod.NumericTablesPage };
-});
-
-const ForeshadowsPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/ForeshadowsPage"));
-  return { default: mod.ForeshadowsPage };
-});
-
-const ChapterAnalysisPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/ChapterAnalysisPage"));
-  return { default: mod.ChapterAnalysisPage };
-});
-
-const PreviewPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/PreviewPage"));
-  return { default: mod.PreviewPage };
-});
-
-const ChapterReaderPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/ChapterReaderPage"));
-  return { default: mod.ChapterReaderPage };
-});
-
-const PromptsPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/PromptsPage"));
-  return { default: mod.PromptsPage };
-});
-
-const PromptStudioPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/PromptStudioPage"));
-  return { default: mod.PromptStudioPage };
-});
-
-const PromptTemplatesPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/PromptTemplatesPage"));
-  return { default: mod.PromptTemplatesPage };
+const ReviewPage = lazy(async () => {
+  const mod = await importWithChunkRetry(() => import("./pages/ReviewPage"));
+  return { default: mod.ReviewPage };
 });
 
 const ExportPage = lazy(async () => {
@@ -111,45 +66,30 @@ const ExportPage = lazy(async () => {
   return { default: mod.ExportPage };
 });
 
-const WorldBookPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/WorldBookPage"));
-  return { default: mod.WorldBookPage };
+const StudioAiPage = lazy(async () => {
+  const mod = await importWithChunkRetry(() => import("./pages/StudioAiPage"));
+  return { default: mod.StudioAiPage };
 });
 
-const GraphPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/GraphPage"));
-  return { default: mod.GraphPage };
+const StudioResearchPage = lazy(async () => {
+  const mod = await importWithChunkRetry(() => import("./pages/StudioResearchPage"));
+  return { default: mod.StudioResearchPage };
 });
 
-const FractalPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/FractalPage"));
-  return { default: mod.FractalPage };
-});
-
-const StylesPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/StylesPage"));
-  return { default: mod.StylesPage };
-});
-
-const RagPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/RagPage"));
-  return { default: mod.RagPage };
-});
-
-const ImportPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/ImportPage"));
-  return { default: mod.ImportPage };
-});
-
-const SearchPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/SearchPage"));
-  return { default: mod.SearchPage };
+const StudioSystemPage = lazy(async () => {
+  const mod = await importWithChunkRetry(() => import("./pages/StudioSystemPage"));
+  return { default: mod.StudioSystemPage };
 });
 
 const NotFoundPage = lazy(async () => {
   const mod = await importWithChunkRetry(() => import("./pages/NotFoundPage"));
   return { default: mod.NotFoundPage };
 });
+
+const legacyProjectRouteChildren = LEGACY_PROJECT_REDIRECTS.map((item) => ({
+  path: item.path,
+  element: <LegacyProjectRouteRedirect resolveTo={item.resolveTo} />,
+}));
 
 const router = createBrowserRouter([
   {
@@ -170,7 +110,9 @@ const router = createBrowserRouter([
         path: "/",
         element: (
           <ProjectsProvider>
-            <AppShell />
+            <AppModeProvider>
+              <AppShell />
+            </AppModeProvider>
           </ProjectsProvider>
         ),
         errorElement: <RouteErrorPage />,
@@ -184,106 +126,78 @@ const router = createBrowserRouter([
             element: <AdminUsersPage />,
           },
           {
+            path: "projects/import",
+            element: <GlobalProjectImportPage />,
+          },
+          {
             path: "projects/:projectId",
             element: <ProjectProviderGuard />,
             children: [
-              { index: true, element: <Navigate to="writing" replace /> },
               {
-                path: "wizard",
-                element: <ProjectWizardPage />,
+                index: true,
+                element: <LegacyProjectRouteRedirect resolveTo={(projectId) => buildProjectHomePath(projectId)} />,
               },
               {
-                path: "settings",
-                element: <SettingsPage />,
+                path: "home",
+                element: <Navigate replace to="overview" />,
               },
               {
-                path: "characters",
-                element: <CharactersPage />,
+                path: "home/:tab",
+                element: <ProjectHomePage />,
+              },
+              {
+                path: "story-bible",
+                element: <Navigate replace to="overview" />,
+              },
+              {
+                path: "story-bible/:tab",
+                element: <StoryBiblePage />,
               },
               {
                 path: "outline",
                 element: <OutlinePage />,
               },
               {
-                path: "writing",
+                path: "write",
                 element: <WritingPage />,
               },
               {
-                path: "tasks",
-                element: <TaskCenterPage />,
+                path: "review",
+                element: <Navigate replace to="preview" />,
               },
               {
-                path: "structured-memory",
-                element: <StructuredMemoryPage />,
+                path: "review/:tab",
+                element: <ReviewPage />,
               },
               {
-                path: "numeric-tables",
-                element: <NumericTablesPage />,
-              },
-              {
-                path: "foreshadows",
-                element: <ForeshadowsPage />,
-              },
-              {
-                path: "chapter-analysis",
-                element: <ChapterAnalysisPage />,
-              },
-              {
-                path: "preview",
-                element: <PreviewPage />,
-              },
-              {
-                path: "reader",
-                element: <ChapterReaderPage />,
-              },
-              {
-                path: "prompts",
-                element: <PromptsPage />,
-              },
-              {
-                path: "prompt-studio",
-                element: <PromptStudioPage />,
-              },
-              {
-                path: "prompt-templates",
-                element: <PromptTemplatesPage />,
-              },
-              {
-                path: "export",
+                path: "publish",
                 element: <ExportPage />,
               },
               {
-                path: "worldbook",
-                element: <WorldBookPage />,
+                path: "studio/ai",
+                element: <Navigate replace to="models" />,
               },
               {
-                path: "graph",
-                element: <GraphPage />,
+                path: "studio/ai/:tab",
+                element: <StudioAiPage />,
               },
               {
-                path: "fractal",
-                element: <FractalPage />,
+                path: "studio/research",
+                element: <Navigate replace to="import-docs" />,
               },
               {
-                path: "styles",
-                element: <StylesPage />,
+                path: "studio/research/:tab",
+                element: <StudioResearchPage />,
               },
               {
-                path: "rag",
-                element: <RagPage />,
+                path: "studio/system",
+                element: <Navigate replace to="tasks" />,
               },
               {
-                path: "import",
-                element: <ImportPage />,
+                path: "studio/system/:tab",
+                element: <StudioSystemPage />,
               },
-              {
-                path: "glossary",
-                element: <Navigate to="../search" replace />,
-              },
-              {
-                path: "search",
-                element: <SearchPage />,
-              },
+              ...legacyProjectRouteChildren,
             ],
           },
           { path: "*", element: <NotFoundPage /> },

@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 
 import type { ChapterAnalyzeResult, ChapterRewriteResult, GenerateForm } from "../../components/writing/types";
 import type { ToastApi } from "../../components/ui/toast";
+import { buildProjectReviewPath } from "../../lib/projectRoutes";
 import { UI_COPY } from "../../lib/uiCopy";
 import { createRequestSeqGuard } from "../../lib/requestSeqGuard";
 import { ApiError, apiJson } from "../../services/apiClient";
@@ -230,7 +231,9 @@ export function useChapterAnalysis(args: {
               }
             }
             window.requestAnimationFrame(() => {
-              navigate(`/projects/${activeChapter.project_id}/chapter-analysis?chapterId=${activeChapter.id}`);
+              navigate(
+                `${buildProjectReviewPath(activeChapter.project_id, "analysis")}?chapterId=${encodeURIComponent(activeChapter.id)}`,
+              );
             });
           })();
         },

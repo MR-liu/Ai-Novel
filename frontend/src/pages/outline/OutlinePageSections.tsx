@@ -1,4 +1,7 @@
+import { useEffect, useRef, useState } from "react";
+
 import { MarkdownEditor } from "../../components/atelier/MarkdownEditor";
+import { FeedbackCallout, FeedbackDisclosure } from "../../components/ui/Feedback";
 import { Modal } from "../../components/ui/Modal";
 import { ProgressBar } from "../../components/ui/ProgressBar";
 import type { OutlineListItem } from "../../types";
@@ -55,7 +58,7 @@ export function OutlineHeaderSection(props: OutlineHeaderSectionProps) {
           </button>
 
           <button
-            className="btn btn-ghost text-danger hover:bg-danger/10"
+            className="btn btn-danger-soft"
             disabled={!props.activeOutlineId}
             onClick={props.onDelete}
             type="button"
@@ -208,6 +211,37 @@ export type OutlineGenerationModalProps = {
 };
 
 export function OutlineGenerationModal(props: OutlineGenerationModalProps) {
+  const [previewOpen, setPreviewOpen] = useState(true);
+  const [rawOpen, setRawOpen] = useState(false);
+  const hadPreviewRef = useRef(false);
+  const hadRawRef = useRef(false);
+
+  useEffect(() => {
+    if (!props.open) return;
+    setPreviewOpen(Boolean(props.streamPreviewJson));
+    setRawOpen(Boolean(props.generating || props.streamRawText));
+    hadPreviewRef.current = Boolean(props.streamPreviewJson);
+    hadRawRef.current = Boolean(props.streamRawText);
+  }, [props.open]);
+
+  useEffect(() => {
+    if (!props.streamPreviewJson) {
+      hadPreviewRef.current = false;
+      return;
+    }
+    if (!hadPreviewRef.current) setPreviewOpen(true);
+    hadPreviewRef.current = true;
+  }, [props.streamPreviewJson]);
+
+  useEffect(() => {
+    if (!props.streamRawText) {
+      hadRawRef.current = false;
+      return;
+    }
+    if (!hadRawRef.current || props.generating) setRawOpen(true);
+    hadRawRef.current = true;
+  }, [props.generating, props.streamRawText]);
+
   return (
     <Modal
       open={props.open}
@@ -316,35 +350,49 @@ export function OutlineGenerationModal(props: OutlineGenerationModalProps) {
           ) : null}
 
           {props.streamPreviewJson ? (
-            <details className="panel p-3" open>
-              <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                {OUTLINE_COPY.streamPreviewTitle}
-                {props.preview ? ` · 已解析 ${props.preview.chapters.length} 章` : ""}
-              </summary>
+            <FeedbackDisclosure
+              className="panel p-3"
+              summaryClassName="ui-transition-fast px-0 py-0 text-xs text-subtext hover:text-ink"
+              bodyClassName="pt-2"
+              title={
+                <>
+                  {OUTLINE_COPY.streamPreviewTitle}
+                  {props.preview ? ` · 已解析 ${props.preview.chapters.length} 章` : ""}
+                </>
+              }
+              open={previewOpen}
+              onToggle={setPreviewOpen}
+            >
               <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words text-xs text-ink">
                 {props.streamPreviewJson}
               </pre>
-            </details>
+            </FeedbackDisclosure>
           ) : props.generating ? (
             <div className="panel p-3 text-xs text-subtext">{OUTLINE_COPY.streamPreviewWaiting}</div>
           ) : null}
 
           {props.streamRawText ? (
-            <details className="panel p-3" open={props.generating}>
-              <summary className="ui-transition-fast cursor-pointer text-xs text-subtext hover:text-ink">
-                {OUTLINE_COPY.streamRawTitle}
-              </summary>
+            <FeedbackDisclosure
+              className="panel p-3"
+              summaryClassName="ui-transition-fast px-0 py-0 text-xs text-subtext hover:text-ink"
+              bodyClassName="pt-2"
+              title={OUTLINE_COPY.streamRawTitle}
+              open={rawOpen}
+              onToggle={setRawOpen}
+            >
               <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words text-xs text-ink">
                 {props.streamRawText}
               </pre>
-            </details>
+            </FeedbackDisclosure>
           ) : props.generating ? (
             <div className="panel p-3 text-xs text-subtext">{OUTLINE_COPY.streamRawWaiting}</div>
           ) : null}
         </div>
       ) : null}
 
-      <div className="mt-5 text-xs text-subtext">{OUTLINE_COPY.riskHint}</div>
+      <FeedbackCallout className="mt-5 text-xs" tone="warning" title="使用提醒">
+        {OUTLINE_COPY.riskHint}
+      </FeedbackCallout>
       <div className="mt-5 flex justify-end gap-2">
         <button className="btn btn-secondary" onClick={props.onClose} type="button">
           {OUTLINE_COPY.cancel}

@@ -347,8 +347,11 @@ def local_register(request: Request, db: DbDep, body: LocalRegisterRequest) -> J
     if not target_user_id:
         raise AppError.validation("user_id 不能为空")
 
+    reserved_admin_ids = {"admin"}
     admin_user_id = (settings.auth_admin_user_id or "").strip()
-    if admin_user_id and target_user_id == admin_user_id:
+    if admin_user_id:
+        reserved_admin_ids.add(admin_user_id.casefold())
+    if target_user_id.casefold() in reserved_admin_ids:
         raise AppError.forbidden("该用户名已被系统保留，请联系管理员分配/重置")
 
     if db.get(User, target_user_id) is not None:

@@ -6,8 +6,18 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from app.api.deps import require_project_viewer
+from app.db.session import SessionLocal
 from app.llm.redaction import redact_text
+from app.models.project_settings import ProjectSettings
+from app.services.graph_context_service import query_graph_context
+from app.services.memory_query_service import normalize_query_text, parse_query_preprocessing_config
 from app.services.run_store import write_generation_run
+from app.services.search_index_service import query_project_search
+from app.services.vector_embedding_overrides import vector_embedding_overrides
+from app.services.vector_kb_service import resolve_query_kbs as resolve_vector_query_kbs
+from app.services.vector_rag_service import VectorSource, query_project
+from app.services.vector_rerank_overrides import vector_rerank_overrides
 
 _DEFAULT_TIMEOUT_SECONDS = 6.0
 _DEFAULT_MAX_OUTPUT_CHARS = 6000
@@ -48,7 +58,14 @@ class McpResearchConfig:
     max_output_chars: int | None = None
 
 
-_ToolRunner = Callable[[dict[str, object]], str]
+@dataclass(frozen=True, slots=True)
+class _ToolRuntimeContext:
+    actor_user_id: str
+    project_id: str
+    chapter_id: str | None
+
+
+_ToolRunner = Callable[[_ToolRuntimeContext, dict[str, object]], str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,50 +101,288 @@ def _redact_obj(value: object) -> object:
     return value
 
 
-def _tool_mock_echo(args: dict[str, object]) -> str:
-    return str(args.get("text") or "")
+def _safe_text_arg(args: dict[str, object], key: str, *, default: str = "", max_length: int = 8000) -> str:
+    raw = args.get(key)
+    if raw is None:
+        return default
+    value = str(raw).strip()
+    return value[:max_length]
 
 
-def _tool_mock_sleep(args: dict[str, object]) -> str:
-    seconds = args.get("seconds")
+def _safe_int_arg(args: dict[str, object], key: str, *, default: int, min_value: int, max_value: int) -> int:
+    raw = args.get(key)
     try:
-        sec = float(seconds) if seconds is not None else 0.0
+        value = int(raw) if raw is not None else default
     except Exception:
-        sec = 0.0
-    if sec < 0:
-        sec = 0.0
-    time.sleep(sec)
-    return f"slept:{sec}"
+        value = default
+    return max(min_value, min(value, max_value))
 
 
-def _tool_mock_fail(_args: dict[str, object]) -> str:
-    raise RuntimeError("mock_fail")
+def _safe_float_arg(
+    args: dict[str, object],
+    key: str,
+    *,
+    default: float | None,
+    min_value: float,
+    max_value: float,
+) -> float | None:
+    raw = args.get(key)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except Exception:
+        return default
+    return max(min_value, min(value, max_value))
+
+
+def _safe_str_list_arg(
+    args: dict[str, object],
+    key: str,
+    *,
+    max_items: int,
+    max_length: int,
+) -> list[str]:
+    raw = args.get(key)
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw[:max_items]:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        out.append(text[:max_length])
+    return out
+
+
+def _format_search_result(*, query_text: str, result: dict[str, object]) -> str:
+    items = result.get("items")
+    item_list = items if isinstance(items, list) else []
+    if not item_list:
+        return f"Query: {query_text}\nNo results."
+
+    lines = [f"Query: {query_text}", f"Mode: {str(result.get('mode') or 'unknown')}"]
+    for index, item in enumerate(item_list[:5], start=1):
+        if not isinstance(item, dict):
+            continue
+        source_type = str(item.get("source_type") or "unknown")
+        source_id = str(item.get("source_id") or "").strip()
+        title = str(item.get("title") or "").strip() or source_id or "Untitled"
+        snippet = str(item.get("snippet") or "").strip().replace("\n", " ")
+        jump_url = str(item.get("jump_url") or "").strip()
+
+        lines.append(f"{index}. [{source_type}] {title}")
+        if snippet:
+            lines.append(f"   {snippet}")
+        if jump_url:
+            lines.append(f"   jump: {jump_url}")
+    return "\n".join(lines)
+
+
+def _format_vector_result(*, query_text: str, result: dict[str, object]) -> str:
+    if not bool(result.get("enabled")):
+        return f"Query: {query_text}\nVector disabled: {str(result.get('disabled_reason') or 'unknown')}"
+
+    final = result.get("final")
+    final_obj = final if isinstance(final, dict) else {}
+    text_md = str(final_obj.get("text_md") or "").strip()
+    if text_md:
+        return f"Query: {query_text}\n{text_md}"
+
+    chunks = final_obj.get("chunks")
+    chunk_list = chunks if isinstance(chunks, list) else []
+    if not chunk_list:
+        return f"Query: {query_text}\nNo vector hits."
+
+    lines = [f"Query: {query_text}", "Top vector hits:"]
+    for index, chunk in enumerate(chunk_list[:4], start=1):
+        if not isinstance(chunk, dict):
+            continue
+        source = str(chunk.get("source") or chunk.get("source_type") or "unknown")
+        title = str(chunk.get("title") or "").strip() or str(chunk.get("source_id") or "").strip() or "Untitled"
+        snippet = str(chunk.get("text_md") or "").strip().replace("\n", " ")
+        lines.append(f"{index}. [{source}] {title}")
+        if snippet:
+            lines.append(f"   {snippet[:240]}")
+    return "\n".join(lines)
+
+
+def _format_graph_result(*, query_text: str, result: dict[str, object]) -> str:
+    if not bool(result.get("enabled")):
+        return f"Query: {query_text}\nGraph disabled: {str(result.get('disabled_reason') or 'unknown')}"
+
+    prompt_block = result.get("prompt_block")
+    prompt_obj = prompt_block if isinstance(prompt_block, dict) else {}
+    text_md = str(prompt_obj.get("text_md") or "").strip()
+    if text_md:
+        return f"Query: {query_text}\n{text_md}"
+
+    matched = result.get("matched")
+    matched_obj = matched if isinstance(matched, dict) else {}
+    names = matched_obj.get("entity_names")
+    entity_names = [str(name).strip() for name in names if str(name).strip()] if isinstance(names, list) else []
+    lines = [f"Query: {query_text}"]
+    if entity_names:
+        lines.append(f"Matched entities: {', '.join(entity_names[:8])}")
+    else:
+        lines.append("No graph matches.")
+    return "\n".join(lines)
+
+
+def _tool_project_search(ctx: _ToolRuntimeContext, args: dict[str, object]) -> str:
+    query_text = _safe_text_arg(args, "q", max_length=200)
+    if not query_text:
+        raise ValueError("q is required")
+    sources = _safe_str_list_arg(args, "sources", max_items=20, max_length=64)
+    limit = _safe_int_arg(args, "limit", default=5, min_value=1, max_value=20)
+    offset = _safe_int_arg(args, "offset", default=0, min_value=0, max_value=1000)
+
+    db = SessionLocal()
+    try:
+        require_project_viewer(db, project_id=ctx.project_id, user_id=ctx.actor_user_id)
+        result = query_project_search(
+            db=db,
+            project_id=ctx.project_id,
+            q=query_text,
+            sources=sources,
+            limit=limit,
+            offset=offset,
+        )
+    finally:
+        db.close()
+    return _format_search_result(query_text=query_text, result=result)
+
+
+def _tool_project_vector_query(ctx: _ToolRuntimeContext, args: dict[str, object]) -> str:
+    query_text_raw = _safe_text_arg(args, "query_text", max_length=8000)
+    if not query_text_raw:
+        raise ValueError("query_text is required")
+    kb_ids = _safe_str_list_arg(args, "kb_ids", max_items=20, max_length=64)
+    sources_raw = _safe_str_list_arg(args, "sources", max_items=10, max_length=64)
+    rerank_hybrid_alpha = _safe_float_arg(args, "rerank_hybrid_alpha", default=None, min_value=0.0, max_value=1.0)
+
+    db = SessionLocal()
+    try:
+        require_project_viewer(db, project_id=ctx.project_id, user_id=ctx.actor_user_id)
+        settings_row = db.get(ProjectSettings, ctx.project_id)
+        embedding = vector_embedding_overrides(settings_row)
+        rerank = vector_rerank_overrides(settings_row)
+        if rerank_hybrid_alpha is not None:
+            rerank = dict(rerank)
+            rerank["hybrid_alpha"] = rerank_hybrid_alpha
+
+        selected_kbs = resolve_vector_query_kbs(db, project_id=ctx.project_id, requested_kb_ids=kb_ids or None)
+        qp_cfg = parse_query_preprocessing_config(
+            (settings_row.query_preprocessing_json or "").strip() if settings_row is not None else None
+        )
+        normalized_query_text, _obs = normalize_query_text(query_text=query_text_raw, config=qp_cfg)
+        selected_kb_ids = [row.kb_id for row in selected_kbs]
+        kb_weights = {row.kb_id: float(row.weight) for row in selected_kbs}
+        kb_orders = {row.kb_id: int(row.order_index) for row in selected_kbs}
+        kb_priority_groups = {row.kb_id: str(getattr(row, "priority_group", "normal") or "normal") for row in selected_kbs}
+    finally:
+        db.close()
+
+    sources: list[VectorSource] = [
+        source  # type: ignore[list-item]
+        for source in sources_raw
+        if source in ("worldbook", "outline", "chapter", "story_memory")
+    ] or ["worldbook", "outline", "chapter", "story_memory"]
+    result = query_project(
+        project_id=ctx.project_id,
+        kb_ids=selected_kb_ids,
+        query_text=normalized_query_text,
+        sources=sources,
+        embedding=embedding,
+        rerank=rerank,
+        kb_weights=kb_weights,
+        kb_orders=kb_orders,
+        kb_priority_groups=kb_priority_groups,
+    )
+    return _format_vector_result(query_text=normalized_query_text, result=result)
+
+
+def _tool_project_graph_query(ctx: _ToolRuntimeContext, args: dict[str, object]) -> str:
+    query_text_raw = _safe_text_arg(args, "query_text", max_length=8000)
+    if not query_text_raw:
+        raise ValueError("query_text is required")
+    hop = _safe_int_arg(args, "hop", default=1, min_value=0, max_value=1)
+    max_nodes = _safe_int_arg(args, "max_nodes", default=12, min_value=1, max_value=200)
+    max_edges = _safe_int_arg(args, "max_edges", default=20, min_value=0, max_value=500)
+
+    db = SessionLocal()
+    try:
+        require_project_viewer(db, project_id=ctx.project_id, user_id=ctx.actor_user_id)
+        settings_row = db.get(ProjectSettings, ctx.project_id)
+        qp_cfg = parse_query_preprocessing_config(
+            (settings_row.query_preprocessing_json or "").strip() if settings_row is not None else None
+        )
+        normalized_query_text, _obs = normalize_query_text(query_text=query_text_raw, config=qp_cfg)
+        result = query_graph_context(
+            db=db,
+            project_id=ctx.project_id,
+            query_text=normalized_query_text,
+            hop=hop,
+            max_nodes=max_nodes,
+            max_edges=max_edges,
+            enabled=True,
+        )
+    finally:
+        db.close()
+    return _format_graph_result(query_text=normalized_query_text, result=result)
 
 
 _TOOLS: dict[str, _Tool] = {
-    "mock.echo": _Tool(
+    "project.search": _Tool(
         spec=McpToolSpec(
-            name="mock.echo",
-            description="Mock tool: returns args.text (for tests/demos).",
-            args_schema={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+            name="project.search",
+            description="Search project content across indexed sources and return concise hit summaries.",
+            args_schema={
+                "type": "object",
+                "properties": {
+                    "q": {"type": "string"},
+                    "sources": {"type": "array", "items": {"type": "string"}},
+                    "limit": {"type": "integer"},
+                    "offset": {"type": "integer"},
+                },
+                "required": ["q"],
+            },
         ),
-        run=_tool_mock_echo,
+        run=_tool_project_search,
     ),
-    "mock.sleep": _Tool(
+    "project.vector_query": _Tool(
         spec=McpToolSpec(
-            name="mock.sleep",
-            description="Mock tool: sleeps for args.seconds (for timeout tests).",
-            args_schema={"type": "object", "properties": {"seconds": {"type": "number"}}, "required": ["seconds"]},
+            name="project.vector_query",
+            description="Run vector retrieval for the current project and return top semantic matches.",
+            args_schema={
+                "type": "object",
+                "properties": {
+                    "query_text": {"type": "string"},
+                    "kb_ids": {"type": "array", "items": {"type": "string"}},
+                    "sources": {"type": "array", "items": {"type": "string"}},
+                    "rerank_hybrid_alpha": {"type": "number"},
+                },
+                "required": ["query_text"],
+            },
         ),
-        run=_tool_mock_sleep,
+        run=_tool_project_vector_query,
     ),
-    "mock.fail": _Tool(
+    "project.graph_query": _Tool(
         spec=McpToolSpec(
-            name="mock.fail",
-            description="Mock tool: raises an exception (for fail-soft tests).",
-            args_schema={"type": "object", "properties": {}},
+            name="project.graph_query",
+            description="Query the structured memory graph and return related entities and relations.",
+            args_schema={
+                "type": "object",
+                "properties": {
+                    "query_text": {"type": "string"},
+                    "hop": {"type": "integer"},
+                    "max_nodes": {"type": "integer"},
+                    "max_edges": {"type": "integer"},
+                },
+                "required": ["query_text"],
+            },
         ),
-        run=_tool_mock_fail,
+        run=_tool_project_graph_query,
     ),
 }
 
@@ -165,6 +420,7 @@ def run_mcp_tool_call_and_record(
     safe_allowlist = [str(x).strip() for x in (allowlist or []) if isinstance(x, str) and x.strip()]
     args_dict = args or {}
     safe_args = _json_safe(args_dict)
+    ctx = _ToolRuntimeContext(actor_user_id=actor_user_id, project_id=project_id, chapter_id=chapter_id)
 
     err_code: str | None = None
     err_msg: str | None = None
@@ -188,7 +444,7 @@ def run_mcp_tool_call_and_record(
     else:
         start = time.monotonic()
         try:
-            raw = _run_with_timeout(fn=lambda: tool.run(args_dict), timeout_seconds=timeout)
+            raw = _run_with_timeout(fn=lambda: tool.run(ctx, args_dict), timeout_seconds=timeout)
             output_text = str(raw or "")
             ok = True
         except FuturesTimeoutError:

@@ -25,7 +25,7 @@ describe("llmConnectionState", () => {
       selectedProfile: null,
     });
     expect(state.stage).toBe("missing_profile");
-    expect(state.actionReason).toContain("主模块 profile");
+    expect(state.actionReason).toContain("主调用连接档案");
   });
 
   it("blocks when the effective profile has no key", () => {
@@ -35,7 +35,7 @@ describe("llmConnectionState", () => {
       selectedProfile: { ...baseProfile, has_api_key: false, masked_api_key: null },
     });
     expect(state.stage).toBe("missing_key");
-    expect(state.detail).toContain("API Key");
+    expect(state.detail).toContain("访问密钥");
   });
 
   it("explains fallback provider mismatch for task modules", () => {
@@ -46,7 +46,9 @@ describe("llmConnectionState", () => {
       boundProfile: null,
     });
     expect(state.stage).toBe("provider_mismatch");
-    expect(state.detail).toContain("主模块回退 profile");
+    expect(state.detail).toContain("主调用模块回退连接档案");
+    expect(state.detail).toContain("Anthropic Claude");
+    expect(state.detail).toContain("通用 OpenAI 对话接口");
   });
 
   it("describes empty remote model lists after a successful request", () => {
@@ -65,6 +67,7 @@ describe("llmConnectionState", () => {
       },
       access,
     );
+    expect(text).toContain("模型服务");
     expect(text).toContain("没有返回候选模型");
   });
 });

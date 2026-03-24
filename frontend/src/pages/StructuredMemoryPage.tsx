@@ -2,14 +2,24 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { DebugDetails, DebugPageShell } from "../components/atelier/DebugPageShell";
+import { ResearchWorkbenchPanel } from "../components/layout/ResearchWorkbenchPanel";
+import { Badge } from "../components/ui/Badge";
+import { FeedbackCallout, FeedbackDisclosure, FeedbackEmptyState, FeedbackStateCard } from "../components/ui/Feedback";
 import { Drawer } from "../components/ui/Drawer";
 import { RequestIdBadge } from "../components/ui/RequestIdBadge";
 import { useToast } from "../components/ui/toast";
 import { MemoryUpdateDrawer } from "../components/writing/MemoryUpdateDrawer";
 import { useProjectData } from "../hooks/useProjectData";
+import {
+  buildProjectReviewPath,
+  buildProjectWritePath,
+  buildStoryBiblePath,
+  buildStudioSystemPath,
+} from "../lib/projectRoutes";
 import { UI_COPY } from "../lib/uiCopy";
 import { ApiError, apiJson } from "../services/apiClient";
 import { CharacterRelationsView } from "./structuredMemory/CharacterRelationsView";
+import { SYSTEM_WORKBENCH_COPY } from "./systemWorkbenchModels";
 
 type TableName = "entities" | "relations" | "events" | "foreshadows" | "evidence";
 type ViewMode = "table" | "character_relations";
@@ -90,6 +100,14 @@ const STRUCTURED_TABLE_LABELS: Record<TableName, string> = {
   events: UI_COPY.structuredMemory.tabs.events,
   foreshadows: UI_COPY.structuredMemory.tabs.foreshadows,
   evidence: UI_COPY.structuredMemory.tabs.evidence,
+};
+
+const STRUCTURED_TABLE_DESCRIPTIONS: Record<TableName, string> = {
+  entities: "查看人物、地点、组织等实体名和摘要，确认故事里的关键对象是否被稳定识别。",
+  relations: "核对人物与实体之间的关系链，适合追查谁和谁发生了怎样的连接。",
+  events: "检查重要事件是否被抽取，并确认标题、类型与摘要有没有跑偏。",
+  foreshadows: "集中查看伏笔是否仍未解决，以及哪些伏笔已经被系统标记为完成。",
+  evidence: "回看底层证据片段，确认记忆底座引用的原文是否准确、是否需要回修。",
 };
 
 function tableLabel(t: TableName): string {
@@ -213,9 +231,28 @@ export function StructuredMemoryPage() {
   );
   const cursor = pageQuery.data?.cursor ?? null;
   const items = useMemo(() => pageQuery.data?.items ?? [], [pageQuery.data?.items]);
+  const activeScopeTitle = viewMode === "table" ? tableLabel(activeTable) : "人物关系";
+  const activeScopeDescription =
+    viewMode === "table"
+      ? STRUCTURED_TABLE_DESCRIPTIONS[activeTable]
+      : "只查看 character 实体之间的关系，适合手工修正人物连线、补证据或回滚最近一次关系改动。";
+  const activeScopeMeta =
+    viewMode === "table" ? `${counts[activeTable] ?? 0} 条记录` : `${counts.relations ?? 0} 条关系`;
+  const visibleRecordCount = viewMode === "table" ? counts[activeTable] ?? 0 : counts.relations ?? 0;
+  const totalRecordCount =
+    counts.entities + counts.relations + counts.events + counts.foreshadows + counts.evidence;
+  const querySummary = queryText.trim() || "尚未缩小具体治理范围";
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const nextActionText =
+    viewMode === "character_relations"
+      ? "先核对人物关系和证据，再决定是否进入人物关系编辑或回写连续性。"
+      : selectedIds.length > 0
+        ? "已选中记录，下一步更适合生成批量操作指令或打开连续性更新。"
+        : queryText.trim()
+          ? "先确认筛出的记录是不是这次要整理的范围，再决定是否做批量操作。"
+          : "先选中正确表，再用关键词把治理范围缩小到足够安全。";
 
   const loadMore = useCallback(async () => {
     if (!projectId) return;
@@ -280,7 +317,7 @@ export function StructuredMemoryPage() {
         await navigator.clipboard.writeText(text);
         toast.toastSuccess(`已复制 ${label}`);
       } catch {
-        toast.toastWarning(`复制失败，请手动复制下方 JSON（${label}）`);
+        toast.toastWarning(`复制失败，请手动复制下方底层指令（JSON）（${label}）`);
       }
     },
     [toast],
@@ -313,12 +350,24 @@ export function StructuredMemoryPage() {
     setQueryText(searchText.trim());
   }, [searchText]);
 
-  if (!projectId) return <div className="text-subtext">缺少 projectId</div>;
+  if (!projectId)
+    return (
+      <FeedbackStateCard
+        tone="danger"
+        kicker="连续性底座"
+        title="当前无法打开连续性底座"
+        description="缺少项目上下文，请从具体项目进入后再查看实体、关系、事件、伏笔和证据记录。"
+      />
+    );
 
   return (
     <DebugPageShell
-      title={UI_COPY.structuredMemory.title}
-      description={UI_COPY.structuredMemory.subtitle}
+      eyebrow="系统与任务"
+      title="连续性底座"
+      description="把实体、关系、事件、伏笔和证据收进一层连续性记录面板，帮助你核对故事结构到底写进了什么。"
+      whenToUse="排查连续性更新、图谱抽取或记忆注入为什么不对，或者要批量整理连续性记录时。"
+      outcome="你会看到每类连续性记录的数量、内容和操作入口，并能继续进入人物关系编辑。"
+      risk="这里面向高级整理和排障，批量操作会影响连续性记录，应用前最好先确认范围。"
       actions={
         <>
           <button className="btn btn-secondary" onClick={() => void pageQuery.refresh()} type="button">
@@ -332,54 +381,93 @@ export function StructuredMemoryPage() {
           <button
             className="btn btn-secondary"
             disabled={!chapterId}
-            title={chapterId ? undefined : "建议从写作页带上 ?chapterId=... 打开以便 Apply"}
+            title={chapterId ? undefined : "建议从写作页带上当前章节再打开，后续应用会更顺"}
             onClick={() => setMemoryUpdateOpen(true)}
             type="button"
           >
-            Memory Update
+            连续性更新
           </button>
         </>
       }
     >
-      {projectId ? (
-        <div className="callout-info text-sm">
-          提示：本页是图谱底座数据（实体/关系/事件/伏笔/证据）。金钱/时间/等级/资源等数值状态请到{" "}
-          <Link className="underline" to={`/projects/${projectId}/numeric-tables`}>
-            {UI_COPY.nav.numericTables}
-          </Link>
-          。
+      <section className="manuscript-status-band">
+        <div className="grid gap-1">
+          <div className="text-sm text-ink">{nextActionText}</div>
+          <div className="text-xs text-subtext">
+            建议顺序：先决定视图和表范围，再筛选记录，最后才做批量整理或连续性更新。
+          </div>
         </div>
-      ) : null}
-      <div className="rounded-atelier border border-border bg-canvas p-3">
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              className={`btn ${viewMode === "table" ? "btn-primary" : "btn-secondary"}`}
-              onClick={() => {
-                setBulkOpsOpen(false);
-                setSelectedIds([]);
-                setViewMode("table");
-              }}
-              aria-label="structured_view_table"
-              type="button"
-            >
-              数据表
-            </button>
-            <button
-              className={`btn ${viewMode === "character_relations" ? "btn-primary" : "btn-secondary"}`}
-              onClick={() => {
-                setBulkOpsOpen(false);
-                setSelectedIds([]);
-                setViewMode("character_relations");
-              }}
-              aria-label="structured_view_character_relations"
-              type="button"
-            >
-              人物关系
-            </button>
+        <div className="manuscript-status-list">
+          <span className="manuscript-chip">当前视图：{viewMode === "table" ? "数据表" : "人物关系"}</span>
+          <span className="manuscript-chip">当前范围：{activeScopeTitle}</span>
+          <span className="manuscript-chip">范围内记录：{visibleRecordCount}</span>
+          <span className="manuscript-chip">底座总记录：{totalRecordCount}</span>
+          <span className="manuscript-chip">已选条目：{selectedIds.length}</span>
+          <span className="manuscript-chip">{includeDeleted ? "包含已删除记录" : "仅看有效记录"}</span>
+          <span className="manuscript-chip max-w-[260px] truncate" title={querySummary}>
+            当前筛选：{querySummary}
+          </span>
+        </div>
+      </section>
 
-            {viewMode === "table"
-              ? (["entities", "relations", "events", "foreshadows", "evidence"] as const).map((t) => (
+      <ResearchWorkbenchPanel eyebrow="当前系统路径" {...SYSTEM_WORKBENCH_COPY["structured-memory"]} variant="compact" />
+
+      <section className="research-guide-panel">
+        <div className="studio-cluster-header">
+          <div>
+            <div className="studio-cluster-title">治理范围与工作视图</div>
+            <div className="studio-cluster-copy">
+              先决定你是在看连续性记录，还是直接整理人物关系；再决定是否包含已删除记录和要看的具体表。
+            </div>
+          </div>
+          <div className="studio-cluster-meta">{viewMode === "table" ? "数据清单模式" : "人物关系模式"}</div>
+        </div>
+
+        {projectId ? (
+          <FeedbackCallout className="mt-4 text-sm" title="使用提醒">
+            本页是图谱底座数据（实体/关系/事件/伏笔/证据）。金钱/时间/等级/资源等数值状态请到{" "}
+            <Link className="underline" to={buildStoryBiblePath(projectId, "tables")}>
+              {UI_COPY.nav.numericTables}
+            </Link>
+            。
+          </FeedbackCallout>
+        ) : null}
+
+        <div className="studio-overview-grid lg:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
+          <div className="studio-overview-card is-emphasis">
+            <div className="studio-overview-label">工作视图</div>
+            <div className="studio-overview-value">先选治理方式</div>
+            <div className="studio-overview-copy">数据表适合看连续性记录，人物关系适合直接精修角色连线。先选对模式，再开始筛选和批量整理。</div>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                className={`btn ${viewMode === "table" ? "btn-primary" : "btn-secondary"}`}
+                onClick={() => {
+                  setBulkOpsOpen(false);
+                  setSelectedIds([]);
+                  setViewMode("table");
+                }}
+                aria-label="structured_view_table"
+                type="button"
+              >
+                数据表
+              </button>
+              <button
+                className={`btn ${viewMode === "character_relations" ? "btn-primary" : "btn-secondary"}`}
+                onClick={() => {
+                  setBulkOpsOpen(false);
+                  setSelectedIds([]);
+                  setViewMode("character_relations");
+                }}
+                aria-label="structured_view_character_relations"
+                type="button"
+              >
+                人物关系
+              </button>
+            </div>
+
+            {viewMode === "table" ? (
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {(["entities", "relations", "events", "foreshadows", "evidence"] as const).map((t) => (
                   <button
                     key={t}
                     className={`btn ${activeTable === t ? "btn-primary" : "btn-secondary"}`}
@@ -393,183 +481,229 @@ export function StructuredMemoryPage() {
                   >
                     {tableLabel(t)} <span className="text-xs opacity-80">({counts[t] ?? 0})</span>
                   </button>
-                ))
-              : null}
+                ))}
+              </div>
+            ) : (
+              <div className="mt-3 text-xs leading-6 text-subtext">
+                该视图只用于编辑人物关系，会过滤到 `entity_type=character` 的关系链，并支持继续补证据或回滚最近改动。
+              </div>
+            )}
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
-            <RequestIdBadge requestId={requestId} />
-            <label className="flex items-center gap-2 text-sm text-ink">
-              <input
-                className="checkbox"
-                checked={includeDeleted}
-                onChange={(e) => {
-                  setBulkOpsOpen(false);
-                  setSelectedIds([]);
-                  setIncludeDeleted(e.target.checked);
-                }}
-                aria-label="structured_include_deleted"
-                type="checkbox"
-              />
-              {UI_COPY.structuredMemory.includeDeleted}
-            </label>
+          <div className="studio-overview-card">
+            <div className="studio-overview-label">当前范围</div>
+            <div className="studio-overview-value">{activeScopeTitle}</div>
+            <div className="studio-overview-copy">{activeScopeDescription}</div>
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-subtext">
+              <span className="rounded-full border border-border px-2 py-1 text-ink">{activeScopeTitle}</span>
+              <span>{activeScopeMeta}</span>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <RequestIdBadge requestId={requestId} />
+              <label className="flex items-center gap-2 text-sm text-ink">
+                <input
+                  className="checkbox"
+                  checked={includeDeleted}
+                  onChange={(e) => {
+                    setBulkOpsOpen(false);
+                    setSelectedIds([]);
+                    setIncludeDeleted(e.target.checked);
+                  }}
+                  aria-label="structured_include_deleted"
+                  type="checkbox"
+                />
+                {UI_COPY.structuredMemory.includeDeleted}
+              </label>
+            </div>
           </div>
         </div>
 
         {viewMode === "table" ? (
-          <>
-            <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              <label className="grid gap-1 sm:col-span-2">
-                <span className="text-xs text-subtext">搜索（q）</span>
-                <div className="flex gap-2">
-                  <input
-                    className="input flex-1"
-                    value={searchText}
-                    onChange={(e) => setSearchText(e.target.value)}
-                    aria-label="structured_search"
-                    placeholder="Alice"
-                  />
-                  <button className="btn btn-secondary" onClick={applySearch} type="button">
-                    搜索
-                  </button>
+          <div className="mt-4 rounded-atelier border border-border bg-canvas p-3">
+            <div className="studio-cluster-header">
+              <div>
+                <div className="text-sm text-ink">查询与选择</div>
+                <div className="mt-1 text-xs leading-6 text-subtext">
+                  先用关键词缩小范围，再决定要不要选择当前页记录生成批量操作指令。
                 </div>
-              </label>
+              </div>
+              <div className="studio-cluster-meta">
+                {selectedIds.length > 0 ? `已选 ${selectedIds.length} 条` : `${counts[activeTable] ?? 0} 条记录`}
+              </div>
             </div>
+            <label className="mt-4 grid gap-1">
+              <span className="text-xs text-subtext">搜索（q）</span>
+              <div className="flex gap-2">
+                <input
+                  className="input flex-1"
+                  value={searchText}
+                  onChange={(e) => setSearchText(e.target.value)}
+                  aria-label="structured_search"
+                  placeholder="Alice"
+                />
+                <button className="btn btn-secondary" onClick={applySearch} type="button">
+                  搜索
+                </button>
+              </div>
+            </label>
 
             {selectedIds.length > 0 ? (
-              <div className="mt-4 text-xs text-subtext">
+              <div className="mt-3 text-xs text-subtext">
                 已选择 <span className="text-ink">{selectedIds.length}</span> 条（{tableLabel(activeTable)}
-                ）。可点击右上角“批量操作” 生成 JSON 并打开 Memory Update。
-              </div>
-            ) : null}
-          </>
-        ) : (
-          <div className="mt-3 text-xs text-subtext">该视图仅用于编辑人物关系（entity_type=character）。</div>
-        )}
-      </div>
-
-      {viewMode === "table" ? (
-        <>
-          <div className="rounded-atelier border border-border bg-canvas p-3">
-            {pageQuery.loading ? <div className="text-sm text-subtext">加载中...</div> : null}
-            {!pageQuery.loading && items.length === 0 ? <div className="text-sm text-subtext">暂无数据</div> : null}
-
-            {items.length > 0 ? (
-              <div className="mt-2 overflow-auto rounded-atelier border border-border">
-                <table className="min-w-full text-left text-sm">
-                  <thead className="bg-surface text-xs text-subtext">
-                    <tr>
-                      <th className="w-10 p-2">
-                        <button
-                          className="btn btn-secondary btn-icon"
-                          onClick={selectAll}
-                          type="button"
-                          aria-label="structured_select_all"
-                        >
-                          ✓
-                        </button>
-                      </th>
-                      <th className="p-2">主字段</th>
-                      <th className="p-2">摘要</th>
-                      <th className="p-2">状态</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {items.map((row) => {
-                      const id = readStringField(row, "id");
-                      const deletedAt = readStringField(row, "deleted_at");
-                      const checked = selectedSet.has(id);
-
-                      let primary = id;
-                      let summary = "-";
-                      if (activeTable === "entities") {
-                        primary = `${readStringField(row, "entity_type")}:${readStringField(row, "name")}`;
-                        summary = safeSnippet(readTextField(row, "summary_md"));
-                      } else if (activeTable === "relations") {
-                        primary = `${readStringField(row, "relation_type")}:${readStringField(row, "from_entity_id")}→${readStringField(row, "to_entity_id")}`;
-                        summary = safeSnippet(readTextField(row, "description_md"));
-                      } else if (activeTable === "events") {
-                        primary = `${readStringField(row, "event_type")}:${readStringField(row, "title") || id}`;
-                        summary = safeSnippet(readTextField(row, "content_md"));
-                      } else if (activeTable === "foreshadows") {
-                        primary = `${readBoolField(row, "resolved") ? "已解决" : "未解决"}:${readStringField(row, "title") || id}`;
-                        summary = safeSnippet(readTextField(row, "content_md"));
-                      } else if (activeTable === "evidence") {
-                        primary = `${readStringField(row, "source_type")}:${readStringField(row, "source_id") || "-"}`;
-                        summary = safeSnippet(readTextField(row, "quote_md"));
-                      }
-
-                      return (
-                        <tr key={id} className="border-t border-border">
-                          <td className="p-2">
-                            <input
-                              className="checkbox"
-                              aria-label={`structured_select_${id}`}
-                              checked={checked}
-                              onChange={(e) => toggleSelected(id, e.target.checked)}
-                              type="checkbox"
-                            />
-                          </td>
-                          <td className="p-2">
-                            <div className="truncate text-ink">{primary}</div>
-                            <div className="mt-1 truncate text-[11px] text-subtext">{id}</div>
-                          </td>
-                          <td className="p-2">
-                            <div className="max-w-[520px] truncate text-subtext">{summary}</div>
-                          </td>
-                          <td className="p-2">
-                            {deletedAt ? (
-                              <span className="inline-flex rounded bg-danger/10 px-2 py-0.5 text-[11px] text-danger">
-                                已删除
-                              </span>
-                            ) : (
-                              <span className="inline-flex rounded bg-success/10 px-2 py-0.5 text-[11px] text-success">
-                                正常
-                              </span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            ) : null}
-
-            {cursor ? (
-              <div className="mt-3 flex justify-center">
-                <button className="btn btn-secondary" onClick={() => void loadMore()} type="button">
-                  加载更多
-                </button>
+                ）。可点击右上角“批量操作”生成指令，并继续进入连续性更新。
               </div>
             ) : null}
           </div>
+        ) : null}
+      </section>
 
-          <DebugDetails title={UI_COPY.help.title}>
-            <div className="grid gap-2 text-xs text-subtext">
-              <div>{UI_COPY.structuredMemory.usageHint}</div>
-              <div>{UI_COPY.structuredMemory.exampleHint}</div>
-              {projectId ? (
-                <div>
-                  常用入口：从{" "}
-                  <Link className="underline" to={`/projects/${projectId}/writing`}>
-                    写作页
-                  </Link>{" "}
-                  或{" "}
-                  <Link className="underline" to={`/projects/${projectId}/chapter-analysis`}>
-                    章节分析
-                  </Link>{" "}
-                  触发“Memory Update”，再在{" "}
-                  <Link className="underline" to={`/projects/${projectId}/tasks`}>
-                    任务中心
-                  </Link>{" "}
-                  追踪 ChangeSet/任务状态。
+      {viewMode === "table" ? (
+        <>
+          <section className="panel p-4">
+            <div className="studio-cluster-header">
+              <div>
+                <div className="studio-cluster-title">连续性记录</div>
+                <div className="studio-cluster-copy">
+                  浏览当前表里的连续性记录，先看摘要和状态，再决定是否需要批量整理或回到写作链路重新生成。
+                </div>
+              </div>
+              <div className="studio-cluster-meta">{cursor ? "可继续加载更多" : "当前已到末尾"}</div>
+            </div>
+
+            <div className="mt-4 rounded-atelier border border-border bg-canvas p-3">
+              {pageQuery.loading ? <div className="text-sm text-subtext">加载中...</div> : null}
+              {!pageQuery.loading && items.length === 0 ? (
+                <FeedbackEmptyState
+                  variant="compact"
+                  title="当前范围下还没有记录"
+                  description="可以换一个表、调整筛选词，或切到人物关系模式继续排查连续性底座。"
+                />
+              ) : null}
+
+              {items.length > 0 ? (
+                <div className="mt-2 overflow-auto rounded-atelier border border-border">
+                  <table className="min-w-full text-left text-sm">
+                    <thead className="bg-surface text-xs text-subtext">
+                      <tr>
+                        <th className="w-10 p-2">
+                          <button
+                            className="btn btn-secondary btn-icon"
+                            onClick={selectAll}
+                            type="button"
+                            aria-label="structured_select_all"
+                          >
+                            ✓
+                          </button>
+                        </th>
+                        <th className="p-2">主字段</th>
+                        <th className="p-2">摘要</th>
+                        <th className="p-2">状态</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {items.map((row) => {
+                        const id = readStringField(row, "id");
+                        const deletedAt = readStringField(row, "deleted_at");
+                        const checked = selectedSet.has(id);
+
+                        let primary = id;
+                        let summary = "-";
+                        if (activeTable === "entities") {
+                          primary = `${readStringField(row, "entity_type")}:${readStringField(row, "name")}`;
+                          summary = safeSnippet(readTextField(row, "summary_md"));
+                        } else if (activeTable === "relations") {
+                          primary = `${readStringField(row, "relation_type")}:${readStringField(row, "from_entity_id")}→${readStringField(row, "to_entity_id")}`;
+                          summary = safeSnippet(readTextField(row, "description_md"));
+                        } else if (activeTable === "events") {
+                          primary = `${readStringField(row, "event_type")}:${readStringField(row, "title") || id}`;
+                          summary = safeSnippet(readTextField(row, "content_md"));
+                        } else if (activeTable === "foreshadows") {
+                          primary = `${readBoolField(row, "resolved") ? "已解决" : "未解决"}:${readStringField(row, "title") || id}`;
+                          summary = safeSnippet(readTextField(row, "content_md"));
+                        } else if (activeTable === "evidence") {
+                          primary = `${readStringField(row, "source_type")}:${readStringField(row, "source_id") || "-"}`;
+                          summary = safeSnippet(readTextField(row, "quote_md"));
+                        }
+
+                        return (
+                          <tr key={id} className="border-t border-border">
+                            <td className="p-2">
+                              <input
+                                className="checkbox"
+                                aria-label={`structured_select_${id}`}
+                                checked={checked}
+                                onChange={(e) => toggleSelected(id, e.target.checked)}
+                                type="checkbox"
+                              />
+                            </td>
+                            <td className="p-2">
+                              <div className="truncate text-ink">{primary}</div>
+                              <div className="mt-1 truncate text-[11px] text-subtext">{id}</div>
+                            </td>
+                            <td className="p-2">
+                              <div className="max-w-[520px] truncate text-subtext">{summary}</div>
+                            </td>
+                            <td className="p-2">
+                              {deletedAt ? (
+                                <Badge tone="danger">已删除</Badge>
+                              ) : (
+                                <Badge tone="success">正常</Badge>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               ) : null}
-              <div>{UI_COPY.structuredMemory.bulkOpsHint}</div>
-              <div className="text-amber-700 dark:text-amber-300">{UI_COPY.structuredMemory.bulkOpsRisk}</div>
+
+              {cursor ? (
+                <div className="mt-3 flex justify-center">
+                  <button className="btn btn-secondary" onClick={() => void loadMore()} type="button">
+                    加载更多
+                  </button>
+                </div>
+              ) : null}
             </div>
-          </DebugDetails>
+          </section>
+
+          <div className="studio-cluster">
+            <div className="studio-cluster-header">
+              <div>
+                <div className="studio-cluster-title">批量整理与使用说明</div>
+                <div className="studio-cluster-copy">
+                  只有在你明确知道要删除、标记解决或手工修补连续性记录时，再展开高级说明和批量操作。
+                </div>
+              </div>
+            </div>
+
+            <DebugDetails title={UI_COPY.help.title}>
+              <div className="grid gap-2 text-xs text-subtext">
+                <div>{UI_COPY.structuredMemory.usageHint}</div>
+                <div>{UI_COPY.structuredMemory.exampleHint}</div>
+                {projectId ? (
+                  <div>
+                    常用入口：从{" "}
+                    <Link className="underline" to={buildProjectWritePath(projectId)}>
+                      写作页
+                    </Link>{" "}
+                    或{" "}
+                    <Link className="underline" to={buildProjectReviewPath(projectId, "analysis")}>
+                      章节分析
+                    </Link>{" "}
+                    触发“连续性更新”，再在{" "}
+                    <Link className="underline" to={buildStudioSystemPath(projectId, "tasks")}>
+                      任务中心
+                    </Link>{" "}
+                    追踪变更集和任务状态。
+                  </div>
+                ) : null}
+                <div>{UI_COPY.structuredMemory.bulkOpsHint}</div>
+                <div className="text-amber-700 dark:text-amber-300">{UI_COPY.structuredMemory.bulkOpsRisk}</div>
+              </div>
+            </DebugDetails>
+          </div>
 
           <Drawer
             open={bulkOpsOpen}
@@ -599,7 +733,11 @@ export function StructuredMemoryPage() {
 
               <div className="flex-1 overflow-auto p-4">
                 {selectedIds.length === 0 ? (
-                  <div className="text-sm text-subtext">请先在表格中选择条目。</div>
+                  <FeedbackEmptyState
+                    variant="compact"
+                    title="还没有选中任何条目"
+                    description="先在左侧记录表里勾选要整理的对象，再回来生成删除或标记已解决的操作指令。"
+                  />
                 ) : (
                   <div className="grid gap-3">
                     <div className="rounded-atelier border border-border bg-surface p-3">
@@ -618,19 +756,19 @@ export function StructuredMemoryPage() {
                     </div>
 
                     <div className="rounded-atelier border border-border bg-surface p-3">
-                      <div className="text-xs text-subtext">2）生成操作</div>
-                      <div className="mt-1 text-xs text-subtext">删除操作：{selectedIds.length} 条</div>
+                      <div className="text-xs text-subtext">2）生成指令</div>
+                      <div className="mt-1 text-xs text-subtext">删除指令：{selectedIds.length} 条</div>
                       {activeTable === "foreshadows" ? (
-                        <div className="mt-1 text-xs text-subtext">标记已解决：{selectedIds.length} 条（可选）</div>
+                        <div className="mt-1 text-xs text-subtext">标记已解决指令：{selectedIds.length} 条（可选）</div>
                       ) : null}
                     </div>
 
                     <div className="rounded-atelier border border-border bg-surface p-3">
-                      <div className="text-xs text-subtext">3）复制并打开 Memory Update</div>
+                      <div className="text-xs text-subtext">3）复制并打开连续性更新</div>
                       <div className="mt-2 flex flex-wrap gap-2">
                         <button
                           className="btn btn-secondary"
-                          onClick={() => void copyText(generatedDeleteOpsJson, "删除操作 JSON")}
+                          onClick={() => void copyText(generatedDeleteOpsJson, "删除指令")}
                           type="button"
                         >
                           {UI_COPY.structuredMemory.copyDeleteOps}
@@ -638,7 +776,7 @@ export function StructuredMemoryPage() {
                         {activeTable === "foreshadows" ? (
                           <button
                             className="btn btn-secondary"
-                            onClick={() => void copyText(generatedResolvedOpsJson, "标记已解决 JSON")}
+                            onClick={() => void copyText(generatedResolvedOpsJson, "标记已解决指令")}
                             type="button"
                           >
                             {UI_COPY.structuredMemory.copyResolvedOps}
@@ -647,19 +785,23 @@ export function StructuredMemoryPage() {
                         <button
                           className="btn btn-secondary"
                           disabled={!chapterId}
-                          title={chapterId ? undefined : "建议从写作页带上 ?chapterId=... 打开以便 Apply"}
+                          title={chapterId ? undefined : "建议从写作页带上当前章节再打开，后续应用会更顺"}
                           onClick={() => {
                             setBulkOpsOpen(false);
                             setMemoryUpdateOpen(true);
                           }}
                           type="button"
                         >
-                          打开 Memory Update
+                          打开连续性更新
                         </button>
                       </div>
 
-                      <details className="mt-3 rounded-atelier border border-border bg-canvas p-3">
-                        <summary className="cursor-pointer select-none text-xs text-ink">查看 JSON（高级）</summary>
+                      <FeedbackDisclosure
+                        className="mt-3 rounded-atelier border border-border bg-canvas px-3 py-2"
+                        summaryClassName="text-xs text-ink"
+                        bodyClassName="pt-3"
+                        title="查看底层指令（高级）"
+                      >
                         <div className="mt-3 grid gap-2">
                           <div className="text-xs text-subtext">{UI_COPY.structuredMemory.deleteOpsLabel}</div>
                           <textarea
@@ -680,12 +822,12 @@ export function StructuredMemoryPage() {
                             </>
                           ) : null}
                         </div>
-                      </details>
+                      </FeedbackDisclosure>
 
-                      <div className="mt-3 rounded-atelier border border-border bg-canvas p-3 text-xs text-subtext">
+                      <FeedbackCallout className="mt-3 text-xs" tone="warning" title="批量治理前确认范围">
                         <div>{UI_COPY.structuredMemory.bulkOpsHint}</div>
                         <div className="mt-1">{UI_COPY.structuredMemory.bulkOpsRisk}</div>
-                      </div>
+                      </FeedbackCallout>
                     </div>
                   </div>
                 )}
@@ -694,13 +836,24 @@ export function StructuredMemoryPage() {
           </Drawer>
         </>
       ) : (
-        <CharacterRelationsView
-          projectId={projectId}
-          chapterId={chapterId}
-          focusRelationId={focusRelationId}
-          includeDeleted={includeDeleted}
-          onRequestId={setRequestId}
-        />
+        <div className="studio-cluster">
+          <div className="studio-cluster-header">
+            <div>
+              <div className="studio-cluster-title">人物关系编辑</div>
+              <div className="studio-cluster-copy">
+                这里聚焦角色之间的连线、关系描述和证据，适合从图谱或写作结果回到人物关系层做精修。
+              </div>
+            </div>
+            <div className="studio-cluster-meta">仅人物关系</div>
+          </div>
+          <CharacterRelationsView
+            projectId={projectId}
+            chapterId={chapterId}
+            focusRelationId={focusRelationId}
+            includeDeleted={includeDeleted}
+            onRequestId={setRequestId}
+          />
+        </div>
       )}
 
       <MemoryUpdateDrawer

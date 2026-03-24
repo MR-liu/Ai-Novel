@@ -1,7 +1,14 @@
 import type { Dispatch, SetStateAction } from "react";
 
+import { FeedbackCallout, FeedbackDisclosure } from "../../components/ui/Feedback";
 import { RequestIdBadge } from "../../components/ui/RequestIdBadge";
 import { UI_COPY } from "../../lib/uiCopy";
+import {
+  formatEmbeddingSummary,
+  formatRerankMethodLabel,
+  formatRerankSummary,
+  formatVectorProviderLabel,
+} from "../../lib/vectorRagCopy";
 import type { ProjectSettings } from "../../types";
 
 import type { SettingsForm, VectorEmbeddingDryRunResult, VectorRerankDryRunResult } from "./models";
@@ -44,62 +51,61 @@ export type SettingsVectorRagSectionProps = {
 
 export function SettingsVectorRagSection(props: SettingsVectorRagSectionProps) {
   return (
-    <details className="panel" aria-label="向量检索（Vector RAG）">
-      <summary className="ui-focus-ring ui-transition-fast cursor-pointer select-none p-6">
+    <section className="panel p-6" id="rag-config" aria-label={UI_COPY.vectorRag.title} role="region">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="grid gap-1">
           <div className="font-content text-xl text-ink">{UI_COPY.vectorRag.title}</div>
           <div className="text-xs text-subtext">{UI_COPY.vectorRag.subtitle}</div>
           <div className="text-xs text-subtext">{UI_COPY.vectorRag.apiKeyHint}</div>
         </div>
-      </summary>
+        <span className="manuscript-chip">只有命中不准时再回来调这里</span>
+      </div>
 
-      <div className="px-6 pb-6 pt-0">
-        <div className="mt-4 grid gap-4">
-          {props.projectId ? (
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-atelier border border-border bg-canvas p-4 text-xs text-subtext">
-              <div className="min-w-0">{SETTINGS_COPY.vectorRag.openPromptsConfigHint}</div>
-              <button className="btn btn-secondary" onClick={props.onOpenPromptsConfig} type="button">
-                {SETTINGS_COPY.vectorRag.openPromptsConfigCta}
-              </button>
+      <FeedbackDisclosure
+        className="mt-4 rounded-atelier border border-border bg-canvas p-4"
+        summaryClassName="px-0 py-0"
+        bodyClassName="pt-4"
+        title={
+          <div className="grid gap-1">
+            <div className="text-sm text-ink">展开资料召回与排序设置</div>
+            <div className="text-xs text-subtext">
+              这里负责“资料找不找得到”和“候选排得是否靠前”。如果你要调整文风或生成语气，应该回提示词与模板配置。
             </div>
+          </div>
+        }
+      >
+        <div className="grid gap-4">
+          {props.projectId ? (
+            <FeedbackCallout
+              className="text-xs"
+              title="需要继续核对项目内召回策略？"
+              actions={
+                <button className="btn btn-secondary" onClick={props.onOpenPromptsConfig} type="button">
+                  {SETTINGS_COPY.vectorRag.openPromptsConfigCta}
+                </button>
+              }
+            >
+              <div className="min-w-0">{SETTINGS_COPY.vectorRag.openPromptsConfigHint}</div>
+            </FeedbackCallout>
           ) : null}
 
-          <div className="rounded-atelier border border-border bg-canvas p-4 text-xs text-subtext">
-            <div className="font-medium text-ink">配置说明（Embedding vs Rerank）</div>
+          <FeedbackCallout className="text-xs" title="什么时候该调这里">
             <ul className="mt-2 list-disc space-y-1 pl-5">
               <li>
-                <span className="font-mono">Embedding</span> 用于向量化（索引/召回）；
-                <span className="font-mono">Rerank</span>
-                用于对候选片段做二次排序。两者可分别配置（provider/base_url/model/api_key 可不同）。
+                资料召回负责先把可引用的内容找回来；结果排序负责把候选片段重新排到更贴题的位置。两者可以分别配置，必要时也能各走各的服务。
               </li>
               <li>
-                保存后可用上方 “测试 embedding / 测试 rerank” 做 <span className="font-mono">dry-run</span>
-                自检（会返回 request_id，便于看后端日志排障）。
+                保存后可先用上方检查按钮做一轮只读自检；如果还要继续排查，再记录 request_id 去看后端日志。
               </li>
               <li>
-                验证是否生效：到项目内「RAG」页运行 Query；结果面板会显示 <span className="font-mono">rerank:</span>
-                概要，并可展开 <span className="font-mono">rerank_obs</span> 查看详情。
+                想验证是否真的生效，可以去项目内“知识库 / 搜索”链路跑一次真实查询，看命中的资料是否更准、排序是否更贴题。
               </li>
             </ul>
-          </div>
+          </FeedbackCallout>
 
           <div className="rounded-atelier border border-border bg-canvas p-4 text-xs text-subtext">
-            <div>
-              当前生效：Embedding 提供方（provider）=
-              {props.baselineSettings.vector_embedding_effective_provider || "openai_compatible"}
-              （状态: {props.baselineSettings.vector_embedding_effective_disabled_reason ?? "enabled"}；来源：
-              {props.baselineSettings.vector_embedding_effective_source}）
-            </div>
-            <div className="mt-1">
-              Rerank：{props.baselineSettings.vector_rerank_effective_enabled ? "enabled" : "disabled"}（method:
-              {props.baselineSettings.vector_rerank_effective_method}；provider:
-              {props.baselineSettings.vector_rerank_effective_provider || "（空）"}；model:
-              {props.baselineSettings.vector_rerank_effective_model || "（空）"}；top_k:
-              {props.baselineSettings.vector_rerank_effective_top_k}；alpha:
-              {props.baselineSettings.vector_rerank_effective_hybrid_alpha ?? 0}；来源:
-              {props.baselineSettings.vector_rerank_effective_source}；配置:
-              {props.baselineSettings.vector_rerank_effective_config_source}）
-            </div>
+            <div>{formatEmbeddingSummary(props.baselineSettings)}</div>
+            <div className="mt-1">{formatRerankSummary(props.baselineSettings)}</div>
           </div>
 
           <div className="rounded-atelier border border-border bg-canvas p-4">
@@ -119,7 +125,7 @@ export function SettingsVectorRagSection(props: SettingsVectorRagSectionProps) {
                   onClick={props.onRunEmbeddingDryRun}
                   type="button"
                 >
-                  {props.embeddingDryRunLoading ? "测试 embedding…" : "测试 embedding"}
+                  {props.embeddingDryRunLoading ? "检查中…" : UI_COPY.vectorRag.dryRunEmbeddingAction}
                 </button>
                 <button
                   className="btn btn-secondary"
@@ -134,58 +140,63 @@ export function SettingsVectorRagSection(props: SettingsVectorRagSectionProps) {
                   onClick={props.onRunRerankDryRun}
                   type="button"
                 >
-                  {props.rerankDryRunLoading ? "测试 rerank…" : "测试 rerank"}
+                  {props.rerankDryRunLoading ? "检查中…" : UI_COPY.vectorRag.dryRunRerankAction}
                 </button>
               </div>
             </div>
             {props.dirty || props.vectorApiKeyDirty || props.rerankApiKeyDirty ? (
-              <div className="mt-1 text-[11px] text-subtext">{SETTINGS_COPY.vectorRag.saveBeforeTestHint}</div>
+              <FeedbackCallout className="mt-3 text-xs" tone="warning" title="检查前先保存">
+                {SETTINGS_COPY.vectorRag.saveBeforeTestHint}
+              </FeedbackCallout>
             ) : null}
 
             {props.embeddingDryRunError ? (
-              <div className="mt-3 rounded-atelier border border-border bg-surface p-3">
-                <div className="text-xs text-danger">
-                  Embedding 测试失败：{props.embeddingDryRunError.message} ({props.embeddingDryRunError.code})
+              <FeedbackCallout className="mt-3 text-xs" tone="danger" title="资料召回检查没有通过">
+                <div>
+                  {props.embeddingDryRunError.message} ({props.embeddingDryRunError.code})
                 </div>
                 <RequestIdBadge requestId={props.embeddingDryRunError.requestId} className="mt-2" />
                 <div className="mt-1 text-[11px] text-subtext">
-                  排障：检查 embedding base_url/model/api_key；打开后端日志并搜索 request_id。
+                  建议先检查召回服务地址、模型名和访问密钥；如果还要继续排查，再根据 request_id 查日志。
                 </div>
-              </div>
+              </FeedbackCallout>
             ) : null}
 
             {props.embeddingDryRun ? (
               <div className="mt-3 rounded-atelier border border-border bg-surface p-3">
                 <div className="text-xs text-subtext">
-                  Embedding：{props.embeddingDryRun.result.enabled ? "enabled" : "disabled"}；dims:
+                  资料召回：{props.embeddingDryRun.result.enabled ? "可用" : "暂不可用"}；向量维度：
                   {props.embeddingDryRun.result.dims ?? "（未知）"}；耗时:
                   {props.embeddingDryRun.result.timings_ms?.total ?? "（未知）"}ms
-                  {props.embeddingDryRun.result.error ? `；error: ${props.embeddingDryRun.result.error}` : ""}
+                  {props.embeddingDryRun.result.error ? `；返回：${props.embeddingDryRun.result.error}` : ""}
                 </div>
                 <RequestIdBadge requestId={props.embeddingDryRun.requestId} className="mt-2" />
               </div>
             ) : null}
 
             {props.rerankDryRunError ? (
-              <div className="mt-3 rounded-atelier border border-border bg-surface p-3">
-                <div className="text-xs text-danger">
-                  Rerank 测试失败：{props.rerankDryRunError.message} ({props.rerankDryRunError.code})
+              <FeedbackCallout className="mt-3 text-xs" tone="danger" title="结果排序检查没有通过">
+                <div>
+                  {props.rerankDryRunError.message} ({props.rerankDryRunError.code})
                 </div>
                 <RequestIdBadge requestId={props.rerankDryRunError.requestId} className="mt-2" />
                 <div className="mt-1 text-[11px] text-subtext">
-                  排障：检查 rerank base_url/model/api_key；若使用 external_rerank_api，确认 /v1/rerank 可访问。
+                  建议先检查重排服务地址、模型名和访问密钥；若使用外部排序接口，再确认 `/v1/rerank` 可访问。
                 </div>
-              </div>
+              </FeedbackCallout>
             ) : null}
 
             {props.rerankDryRun ? (
               <div className="mt-3 rounded-atelier border border-border bg-surface p-3">
                 <div className="text-xs text-subtext">
-                  Rerank：{props.rerankDryRun.result.enabled ? "enabled" : "disabled"}；method:
-                  {props.rerankDryRun.result.method ?? "（未知）"}；provider:
-                  {(props.rerankDryRun.result.rerank as { provider?: string } | undefined)?.provider ?? "（未知）"}
+                  结果排序：{props.rerankDryRun.result.enabled ? "可用" : "暂不可用"}；方式：
+                  {formatRerankMethodLabel(props.rerankDryRun.result.method ?? "")}；服务：
+                  {formatVectorProviderLabel(
+                    (props.rerankDryRun.result.rerank as { provider?: string } | undefined)?.provider ?? "",
+                    "（未知）",
+                  )}
                   ；耗时:
-                  {props.rerankDryRun.result.timings_ms?.total ?? "（未知）"}ms；order:
+                  {props.rerankDryRun.result.timings_ms?.total ?? "（未知）"}ms；当前排序：
                   {(props.rerankDryRun.result.order ?? []).join(" → ") || "（空）"}
                 </div>
                 <RequestIdBadge requestId={props.rerankDryRun.requestId} className="mt-2" />
@@ -205,10 +216,10 @@ export function SettingsVectorRagSection(props: SettingsVectorRagSectionProps) {
                   }
                   type="checkbox"
                 />
-                启用 rerank（对候选片段做相关性重排）
+                启用结果重排（对候选片段做相关性重排）
               </label>
               <label className="grid gap-1 sm:col-span-2">
-                <span className="text-xs text-subtext">重排算法（rerank method）</span>
+                <span className="text-xs text-subtext">重排方式（method）</span>
                 <select
                   className="select"
                   id="settings_vector_rerank_method"
@@ -255,14 +266,16 @@ export function SettingsVectorRagSection(props: SettingsVectorRagSectionProps) {
               </label>
             </div>
             <div className="text-[11px] text-subtext">
-              提示：启用后会对候选结果做二次排序，通常命中更好，但可能增加耗时/成本。
+              提示：启用后会对候选结果做二次排序，通常命中更好，但也可能增加耗时和成本。
             </div>
 
-            <details className="rounded-atelier border border-border bg-canvas p-4" aria-label="Rerank 提供方配置">
-              <summary className="ui-transition-fast cursor-pointer select-none text-sm text-ink hover:text-ink">
-                {UI_COPY.vectorRag.rerankConfigDetailsTitle}
-              </summary>
-              <div className="mt-4 grid gap-4">
+            <FeedbackDisclosure
+              className="rounded-atelier border border-border bg-canvas p-4"
+              summaryClassName="px-0 py-0 text-sm text-ink hover:text-ink"
+              bodyClassName="pt-4"
+              title={UI_COPY.vectorRag.rerankConfigDetailsTitle}
+            >
+              <div className="grid gap-4">
                 <div className="text-xs text-subtext">{UI_COPY.vectorRag.backendEnvFallbackHint}</div>
 
                 <label className="grid gap-1">
@@ -277,8 +290,8 @@ export function SettingsVectorRagSection(props: SettingsVectorRagSectionProps) {
                       props.setSettingsForm((value) => ({ ...value, vector_rerank_provider: e.target.value }))
                     }
                   >
-                    <option value="">（使用后端环境变量）</option>
-                    <option value="external_rerank_api">external_rerank_api</option>
+                    <option value="">（沿用系统默认服务）</option>
+                    <option value="external_rerank_api">外部排序接口（external_rerank_api）</option>
                   </select>
                   <div className="text-[11px] text-subtext">
                     当前有效：{props.baselineSettings.vector_rerank_effective_provider || "（空）"}
@@ -470,20 +483,20 @@ export function SettingsVectorRagSection(props: SettingsVectorRagSectionProps) {
                   </button>
                 </div>
               </div>
-            </details>
+            </FeedbackDisclosure>
           </div>
 
-          <details className="rounded-atelier border border-border bg-canvas p-4">
-            <summary className="ui-transition-fast cursor-pointer select-none text-sm text-ink hover:text-ink">
-              {UI_COPY.vectorRag.embeddingTitle}
-            </summary>
-            <div className="mt-4 grid gap-4">
+          <FeedbackDisclosure
+            className="rounded-atelier border border-border bg-canvas p-4"
+            summaryClassName="px-0 py-0 text-sm text-ink hover:text-ink"
+            bodyClassName="pt-4"
+            title={UI_COPY.vectorRag.embeddingTitle}
+          >
+            <div className="grid gap-4">
               <div className="text-xs text-subtext">{UI_COPY.vectorRag.backendEnvFallbackHint}</div>
 
               <label className="grid gap-1">
-                <span className="text-xs text-subtext">
-                  Embedding 提供方（provider；项目覆盖；留空=使用后端环境变量）
-                </span>
+                <span className="text-xs text-subtext">{UI_COPY.vectorRag.embeddingProviderLabel}</span>
                 <select
                   className="select"
                   value={props.settingsForm.vector_embedding_provider}
@@ -491,16 +504,16 @@ export function SettingsVectorRagSection(props: SettingsVectorRagSectionProps) {
                     props.setSettingsForm((value) => ({ ...value, vector_embedding_provider: e.target.value }))
                   }
                 >
-                  <option value="">（使用后端环境变量）</option>
-                  <option value="openai_compatible">openai_compatible</option>
-                  <option value="azure_openai">azure_openai</option>
-                  <option value="google">google</option>
-                  <option value="custom">custom</option>
-                  <option value="local_proxy">local_proxy</option>
-                  <option value="sentence_transformers">sentence_transformers</option>
+                  <option value="">（沿用系统默认服务）</option>
+                  <option value="openai_compatible">通用 OpenAI 接口（openai_compatible）</option>
+                  <option value="azure_openai">Azure OpenAI（azure_openai）</option>
+                  <option value="google">Google 接口（google）</option>
+                  <option value="custom">自定义接口（custom）</option>
+                  <option value="local_proxy">本地中转服务（local_proxy）</option>
+                  <option value="sentence_transformers">本地向量模型（sentence_transformers）</option>
                 </select>
                 <div className="text-[11px] text-subtext">
-                  当前有效：{props.baselineSettings.vector_embedding_effective_provider || "openai_compatible"}
+                  当前有效：{formatVectorProviderLabel(props.baselineSettings.vector_embedding_effective_provider)}
                 </div>
               </label>
 
@@ -508,7 +521,7 @@ export function SettingsVectorRagSection(props: SettingsVectorRagSectionProps) {
                 <div className="grid gap-4 sm:grid-cols-2">
                   <label className="grid gap-1">
                     <span className="text-xs text-subtext">
-                      Azure 部署名（deployment；项目覆盖；留空=使用后端环境变量）
+                      {UI_COPY.vectorRag.embeddingAzureDeploymentLabel}
                     </span>
                     <input
                       className="input"
@@ -526,7 +539,7 @@ export function SettingsVectorRagSection(props: SettingsVectorRagSectionProps) {
                   </label>
                   <label className="grid gap-1">
                     <span className="text-xs text-subtext">
-                      Azure API 版本（api_version；项目覆盖；留空=使用后端环境变量）
+                      {UI_COPY.vectorRag.embeddingAzureApiVersionLabel}
                     </span>
                     <input
                       className="input"
@@ -547,9 +560,7 @@ export function SettingsVectorRagSection(props: SettingsVectorRagSectionProps) {
 
               {props.embeddingProviderPreview === "sentence_transformers" ? (
                 <label className="grid gap-1">
-                  <span className="text-xs text-subtext">
-                    SentenceTransformers 模型（项目覆盖；留空=使用后端环境变量）
-                  </span>
+                  <span className="text-xs text-subtext">{UI_COPY.vectorRag.embeddingSentenceTransformersModelLabel}</span>
                   <input
                     className="input"
                     value={props.settingsForm.vector_embedding_sentence_transformers_model}
@@ -568,9 +579,7 @@ export function SettingsVectorRagSection(props: SettingsVectorRagSectionProps) {
               ) : null}
 
               <label className="grid gap-1">
-                <span className="text-xs text-subtext">
-                  Embedding 基础地址（base_url；项目覆盖；留空=使用后端环境变量）
-                </span>
+                <span className="text-xs text-subtext">{UI_COPY.vectorRag.embeddingBaseUrlLabel}</span>
                 <input
                   className="input"
                   id="vector_embedding_base_url"
@@ -586,7 +595,7 @@ export function SettingsVectorRagSection(props: SettingsVectorRagSectionProps) {
               </label>
 
               <label className="grid gap-1">
-                <span className="text-xs text-subtext">Embedding 模型（model；项目覆盖；留空=使用后端环境变量）</span>
+                <span className="text-xs text-subtext">{UI_COPY.vectorRag.embeddingModelLabel}</span>
                 <input
                   className="input"
                   id="vector_embedding_model"
@@ -602,7 +611,7 @@ export function SettingsVectorRagSection(props: SettingsVectorRagSectionProps) {
               </label>
 
               <label className="grid gap-1">
-                <span className="text-xs text-subtext">API Key（api_key；项目覆盖；留空不修改）</span>
+                <span className="text-xs text-subtext">{UI_COPY.vectorRag.embeddingApiKeyLabel}</span>
                 <input
                   className="input"
                   id="vector_embedding_api_key"
@@ -657,13 +666,13 @@ export function SettingsVectorRagSection(props: SettingsVectorRagSectionProps) {
                   }}
                   type="button"
                 >
-                  恢复使用后端环境变量（清除项目覆盖）
+                  {UI_COPY.vectorRag.embeddingResetOverrides}
                 </button>
               </div>
             </div>
-          </details>
+          </FeedbackDisclosure>
         </div>
-      </div>
-    </details>
+      </FeedbackDisclosure>
+    </section>
   );
 }

@@ -2,13 +2,17 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { DebugDetails } from "../components/atelier/DebugPageShell";
+import { ResearchWorkbenchPanel } from "../components/layout/ResearchWorkbenchPanel";
+import { FeedbackCallout, FeedbackStateCard } from "../components/ui/Feedback";
 import { useConfirm } from "../components/ui/confirm";
 import { useToast } from "../components/ui/toast";
 import { copyText } from "../lib/copyText";
+import { buildProjectWritePath, buildStudioAiPath } from "../lib/projectRoutes";
 import { PROMPT_STUDIO_TASKS } from "../lib/promptTaskCatalog";
 import { UI_COPY } from "../lib/uiCopy";
 import { ApiError, apiJson, sanitizeFilename } from "../services/apiClient";
 import type { Character, Outline, Project, ProjectSettings, PromptBlock, PromptPreset, PromptPreview } from "../types";
+import { AI_WORKBENCH_COPY } from "./aiWorkbenchModels";
 import { PromptStudioPresetEditorPanel } from "./promptStudio/PromptStudioPresetEditorPanel";
 import { PromptStudioPresetListPanel } from "./promptStudio/PromptStudioPresetListPanel";
 import { PromptStudioPreviewPanel } from "./promptStudio/PromptStudioPreviewPanel";
@@ -257,7 +261,7 @@ export function PromptStudioPage() {
         method: "POST",
         body: JSON.stringify({
           identifier,
-          name: `New block ${idx}`,
+          name: `新片段 ${idx}`,
           role: "system",
           enabled: true,
           template: "",
@@ -285,7 +289,7 @@ export function PromptStudioPage() {
           triggers: formatTriggers(res.data.block.triggers ?? []),
         },
       }));
-      toast.toastSuccess("已添加块");
+      toast.toastSuccess("已添加片段");
     } catch (e) {
       const err = e as ApiError;
       toast.toastError(`${err.message} (${err.code})`, err.requestId);
@@ -301,7 +305,7 @@ export function PromptStudioPage() {
 
       const triggerValidation = parseTriggersWithValidation(draft.triggers);
       if (triggerValidation.invalid.length) {
-        toast.toastError(`triggers 无效：${triggerValidation.invalid.join(", ")}`);
+        toast.toastError(`任务键无效：${triggerValidation.invalid.join(", ")}`);
         return;
       }
 
@@ -411,18 +415,18 @@ export function PromptStudioPage() {
     const actions = Array.isArray(report.actions) ? report.actions : [];
 
     const lines = [
-      `dry_run: ${Boolean(report.dry_run)}`,
-      `created: ${Number(report.created) || 0}`,
-      `updated: ${Number(report.updated) || 0}`,
-      `skipped: ${Number(report.skipped) || 0}`,
-      `conflicts: ${conflicts.length}`,
+      `本次仅预演（dry_run）: ${Boolean(report.dry_run)}`,
+      `预计新建（created）: ${Number(report.created) || 0}`,
+      `预计更新（updated）: ${Number(report.updated) || 0}`,
+      `预计跳过（skipped）: ${Number(report.skipped) || 0}`,
+      `冲突项（conflicts）: ${conflicts.length}`,
       "",
-      "conflicts sample:",
-      ...(conflicts.slice(0, 10).map((c) => JSON.stringify(c)) || ["(none)"]),
+      "冲突示例 JSON（conflicts sample）:",
+      ...(conflicts.slice(0, 10).map((c) => JSON.stringify(c)) || ["(无)"]),
       "",
-      "actions sample:",
-      ...(actions.slice(0, 20).map((a) => JSON.stringify(a)) || ["(none)"]),
-      actions.length > 20 ? `...(${actions.length - 20} more actions)` : "",
+      "变更示例 JSON（actions sample）:",
+      ...(actions.slice(0, 20).map((a) => JSON.stringify(a)) || ["(无)"]),
+      actions.length > 20 ? `...（还有 ${actions.length - 20} 条动作）` : "",
     ].filter((v) => typeof v === "string");
 
     return lines.join("\n").trim();
@@ -442,7 +446,7 @@ export function PromptStudioPage() {
       a.download = `${safeName}.json`;
       a.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      toast.toastSuccess("已导出");
+      toast.toastSuccess("已导出当前蓝图");
     } catch (e) {
       const err = e as ApiError;
       toast.toastError(`${err.message} (${err.code})`, err.requestId);
@@ -466,7 +470,7 @@ export function PromptStudioPage() {
       a.download = `${safeName}_${stamp}.json`;
       a.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      toast.toastSuccess("已导出整套");
+      toast.toastSuccess("已导出整套蓝图备份");
     } catch (e) {
       const err = e as ApiError;
       toast.toastError(`${err.message} (${err.code})`, err.requestId);
@@ -486,11 +490,11 @@ export function PromptStudioPage() {
           method: "POST",
           body: JSON.stringify(obj),
         });
-        toast.toastSuccess("已导入");
+        toast.toastSuccess("已导入单份蓝图");
         await reloadAll();
       } catch (e) {
         if (e instanceof SyntaxError) {
-          toast.toastError("导入失败：不是合法 JSON");
+          toast.toastError("导入失败：文件不是合法 JSON");
           return;
         }
         const err = e as ApiError;
@@ -517,7 +521,7 @@ export function PromptStudioPage() {
 
         const report = dryRunRes.data;
         const ok = await confirm.confirm({
-          title: "导入整套 PromptPresets（dry_run）",
+          title: "导入整套蓝图备份前先预演（dry_run）",
           description: formatImportAllReport(report),
           confirmText: "应用导入",
           cancelText: "取消",
@@ -531,12 +535,12 @@ export function PromptStudioPage() {
         });
 
         toast.toastSuccess(
-          `已导入整套 created:${applyRes.data.created} updated:${applyRes.data.updated} skipped:${applyRes.data.skipped}`,
+          `整套蓝图已导入：新建 ${applyRes.data.created} | 更新 ${applyRes.data.updated} | 跳过 ${applyRes.data.skipped}`,
         );
         await reloadAll();
       } catch (e) {
         if (e instanceof SyntaxError) {
-          toast.toastError("导入失败：不是合法 JSON");
+          toast.toastError("导入失败：文件不是合法 JSON");
           return;
         }
         const err = e as ApiError;
@@ -583,6 +587,27 @@ export function PromptStudioPage() {
   }, [renderLog]);
 
   const tasks: PromptStudioTask[] = PROMPT_STUDIO_TASKS;
+  const taskLabelByKey = useMemo(() => new Map(tasks.map((task) => [task.key, task.label])), [tasks]);
+  const selectedPresetName = selectedPreset?.name ?? presetDraftName.trim() ?? "";
+  const activeTaskSummary = presetDraftActiveFor.length
+    ? presetDraftActiveFor.map((taskKey) => taskLabelByKey.get(taskKey) ?? taskKey).join("、")
+    : "未限定任务，默认所有写作任务可调用";
+  const previewStatusText = !preview
+    ? "尚未做生成前检查"
+    : templateErrors.length
+      ? `有 ${templateErrors.length} 条模板错误`
+      : preview.missing?.length
+        ? `有 ${preview.missing.length} 项变量缺口`
+        : "生成前检查已通过基础校验";
+  const nextStepText = !selectedPresetId
+    ? "先从左侧挑一套蓝图，或新建一套可编辑的方案。"
+    : blocks.length === 0
+      ? "先添加片段，通常从“总控说明”或“写作指令”开始。"
+      : !preview
+        ? "片段已可编辑，建议先跑一次生成前检查。"
+        : templateErrors.length || preview.missing?.length
+          ? "先处理检查里暴露的问题，再回写作页跑真实生成。"
+          : "这套蓝图已具备继续实战验证的条件，可以回写作页跑一次真实起草。";
 
   if (!projectId) return <div className="text-subtext">{UI_COPY.promptStudio.missingProjectId}</div>;
   if (loading) {
@@ -626,144 +651,219 @@ export function PromptStudioPage() {
   if (loadError && !project && !settings && !outline) {
     return (
       <div className="grid gap-6">
-        <div className="error-card">
-          <div className="state-title">加载失败</div>
-          <div className="state-desc">{`${loadError.message} (${loadError.code})`}</div>
-          {loadError.requestId ? (
-            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-subtext">
-              <span>request_id: {loadError.requestId}</span>
-              <button
-                className="btn btn-secondary btn-sm"
-                onClick={() => void copyText(loadError.requestId!, { title: "复制 request_id" })}
-                type="button"
-              >
-                复制 request_id
-              </button>
-            </div>
-          ) : null}
-          <div className="mt-4 flex flex-wrap gap-2">
+        <FeedbackStateCard
+          tone="danger"
+          title="加载失败"
+          description={`${loadError.message} (${loadError.code})`}
+          meta={
+            loadError.requestId ? (
+              <>
+                <span>请求 ID（request_id）: {loadError.requestId}</span>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => void copyText(loadError.requestId!, { title: "复制请求 ID（request_id）" })}
+                  type="button"
+                >
+                  复制请求 ID
+                </button>
+              </>
+            ) : null
+          }
+          actions={
             <button className="btn btn-primary" onClick={() => void reloadAll()} type="button">
               重试
             </button>
-          </div>
-        </div>
+          }
+        />
       </div>
     );
   }
 
   return (
-    <div className="grid gap-6">
-      <div className="panel p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="studio-shell">
+      <section className="manuscript-status-band">
+        <div className="grid gap-1">
+          <div className="text-sm text-ink">{nextStepText}</div>
+          <div className="text-xs text-subtext">
+            建议顺序：先选蓝图，再改片段，跑一次预览检查，最后回写作页做真实起草验证。
+          </div>
+        </div>
+        <div className="manuscript-status-list">
+          <span className="manuscript-chip">{selectedPresetId ? `当前蓝图：${selectedPresetName || "未命名蓝图"}` : "尚未选中蓝图"}</span>
+          <span className="manuscript-chip">{selectedPresetId ? `片段 ${blocks.length} 条` : "等待选择方案"}</span>
+          <span className="manuscript-chip">适用任务：{selectedPresetId ? activeTaskSummary : "待选择"}</span>
+          <span className="manuscript-chip">{previewStatusText}</span>
+        </div>
+      </section>
+
+      <ResearchWorkbenchPanel eyebrow="当前 AI 路径" {...AI_WORKBENCH_COPY["prompt-studio"]} />
+
+      <section className="panel p-4">
+        <div className="studio-cluster-header">
           <div>
-            <div className="text-lg font-semibold">{UI_COPY.promptStudio.titleBeta}</div>
-            <div className="text-xs text-subtext">
-              {UI_COPY.promptStudio.previewNote}{" "}
-              <Link className="underline" to={`/projects/${projectId}/prompts`}>
-                {UI_COPY.promptStudio.backToPrompts}
-              </Link>
-              {" · "}
-              <Link className="underline" to={`/projects/${projectId}/prompt-templates`}>
-                {UI_COPY.promptStudio.newbiePromptTemplates}
-              </Link>
-              {" · "}
-              <Link className="underline" to={`/projects/${projectId}/writing`}>
-                {UI_COPY.promptStudio.goWriting}
-              </Link>
+            <div className="studio-cluster-title">生成蓝图台</div>
+            <div className="studio-cluster-copy">
+              在这里不是单纯改几句提示，而是为不同写作任务挑选蓝图、拆分片段，再用真实渲染结果确认生成是否按预期工作。
             </div>
           </div>
-          <div className="text-xs text-subtext">
-            {busy || importBusy || bulkBusy ? UI_COPY.promptStudio.processing : ""}
+          <div className="studio-cluster-meta">
+            {busy || importBusy || bulkBusy ? UI_COPY.promptStudio.processing : "可开始编排"}
           </div>
         </div>
 
-        <div className="mt-3 grid gap-3">
-          <div className="text-sm text-subtext">{UI_COPY.promptStudio.intro}</div>
-          <DebugDetails title={UI_COPY.help.title}>
+        <div className="manuscript-status-list mt-4">
+          <span className="manuscript-chip">{selectedPresetId ? `当前蓝图：${selectedPresetName || "未命名蓝图"}` : "尚未选中蓝图"}</span>
+          <span className="manuscript-chip">{selectedPresetId ? `片段 ${blocks.length} 条` : "等待选择方案"}</span>
+          <span className="manuscript-chip">适用任务：{selectedPresetId ? activeTaskSummary : "待选择"}</span>
+          <span className="manuscript-chip">{previewStatusText}</span>
+        </div>
+
+        <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+          <div className="rounded-atelier border border-border bg-canvas p-3">
+            <div className="text-sm text-ink">这页最适合做什么</div>
+            <div className="mt-2 text-xs leading-6 text-subtext">
+              当你已经知道“生成方向不太对”，但还不知道是哪段说明造成的时，就来这里。它适合片段级拆解、任务级区分和生成前检查。
+            </div>
+            <div className="mt-3 manuscript-status-list">
+              <span className="manuscript-chip">适合查原因</span>
+              <span className="manuscript-chip">适合做片段级微调</span>
+              <span className="manuscript-chip">不适合直接代替写作实战</span>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                className="btn btn-secondary"
+                onClick={() => void enableRecommendedDefaults()}
+                disabled={busy || importBusy}
+                type="button"
+              >
+                {UI_COPY.promptStudio.enableRecommendedPresets}
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-atelier border border-border bg-canvas p-3">
+            <div className="text-sm text-ink">下一步该去哪</div>
+            <div className="mt-2 text-xs leading-6 text-subtext">
+              {nextStepText}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2 text-xs">
+              <Link className="btn btn-secondary" to={buildStudioAiPath(projectId, "prompts")}>
+                去提示词方案看项目级策略
+              </Link>
+              <Link className="btn btn-secondary" to={buildStudioAiPath(projectId, "templates")}>
+                去模板库整理稳态模板
+              </Link>
+              <Link className="btn btn-secondary" to={buildProjectWritePath(projectId)}>
+                回写作页跑真实生成
+              </Link>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3 lg:grid-cols-3">
+          <div className="surface p-3">
+            <div className="text-xs text-subtext">模板库</div>
+            <div className="mt-2 text-sm font-semibold text-ink">适合沉淀稳定方案</div>
+            <div className="mt-1 text-xs leading-5 text-subtext">当你已经找到有效写法，想把它长期保存下来，下次不再从零开始时，优先去模板库。</div>
+          </div>
+          <div className="surface p-3">
+            <div className="text-xs text-subtext">生成蓝图台</div>
+            <div className="mt-2 text-sm font-semibold text-ink">适合拆解“到底哪段在起作用”</div>
+            <div className="mt-1 text-xs leading-5 text-subtext">这里更像解剖台。把方案拆成片段后，你会更容易知道该删、该补还是该换顺序。</div>
+          </div>
+          <div className="surface p-3">
+            <div className="text-xs text-subtext">写作页</div>
+            <div className="mt-2 text-sm font-semibold text-ink">适合做最终实战验证</div>
+            <div className="mt-1 text-xs leading-5 text-subtext">蓝图检查通过后，仍要回到写作页看真实章节起草效果，避免停留在配置页里反复猜测。</div>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3">
+          <DebugDetails title="怎么进入这页最省力">
             <div className="grid gap-2 text-xs text-subtext">
               <div>{UI_COPY.promptStudio.recommendedFlow}</div>
               <div>{UI_COPY.promptStudio.quickStart}</div>
-              <div className="text-warning">{UI_COPY.promptStudio.advancedHint}</div>
+              <FeedbackCallout className="text-xs" tone="warning" title="高级提醒">
+                {UI_COPY.promptStudio.advancedHint}
+              </FeedbackCallout>
             </div>
           </DebugDetails>
-          <DebugDetails title={UI_COPY.promptStudio.conceptTitle}>
+          <DebugDetails title="蓝图、片段与优先级是怎么协作的">
             <div className="grid gap-1 text-sm text-subtext">
               <div>
-                <span className="font-medium text-ink">预设（Preset）</span>：一套“提示蓝图”，通过{" "}
-                <span className="font-medium text-ink">active_for</span> 决定哪些任务使用它（大纲/章节/规划/润色）。
+                <span className="font-medium text-ink">蓝图</span>：一套完整的生成方案。它会决定哪些任务调用哪一组片段。
               </div>
               <div>
-                <span className="font-medium text-ink">提示块（Block）</span>：可排序/启停，支持
-                role、triggers（按任务触发） 、token 预算与后端统一渲染。
+                <span className="font-medium text-ink">片段</span>：蓝图里的可排序说明卡。它们可以按任务触发、按通道注入，并最终由后端统一渲染。
               </div>
-              <div>若同一任务被多个预设勾选，系统会优先使用“最近更新”的预设（历史导入的预设通常作为兜底）。</div>
+              <div>若同一任务被多套蓝图同时勾选，系统会优先使用“最近更新”的蓝图；历史导入方案更适合作为兜底或参考。</div>
             </div>
           </DebugDetails>
         </div>
+      </section>
 
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            className="btn btn-secondary"
-            onClick={() => void enableRecommendedDefaults()}
-            disabled={busy || importBusy}
-            type="button"
-          >
-            {UI_COPY.promptStudio.enableRecommendedPresets}
-          </button>
+      <section className="studio-cluster">
+        <div className="studio-cluster-header">
+          <div>
+            <div className="studio-cluster-title">蓝图选择、编排与预览</div>
+            <div className="studio-cluster-copy">
+              建议顺序是“先选蓝图，再改片段，最后跑预览”。这样你会更容易知道是哪一个改动真正影响了生成结果。
+            </div>
+          </div>
         </div>
-      </div>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[280px,1fr]">
-        <PromptStudioPresetListPanel
-          busy={busy}
-          importBusy={importBusy}
-          bulkBusy={bulkBusy}
-          tasks={tasks}
-          presets={presets}
-          selectedPresetId={selectedPresetId}
-          setSelectedPresetId={setSelectedPresetId}
-          createPreset={createPreset}
-          exportPreset={exportPreset}
-          exportAllPresets={exportAllPresets}
-          importPreset={importPreset}
-          importAllPresets={importAllPresets}
-        />
-
-        <div className="grid gap-6">
-          <PromptStudioPresetEditorPanel
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[280px,1fr]">
+          <PromptStudioPresetListPanel
             busy={busy}
-            selectedPresetId={selectedPresetId}
+            importBusy={importBusy}
+            bulkBusy={bulkBusy}
             tasks={tasks}
-            presetDraftName={presetDraftName}
-            setPresetDraftName={setPresetDraftName}
-            presetDraftActiveFor={presetDraftActiveFor}
-            setPresetDraftActiveFor={setPresetDraftActiveFor}
-            savePreset={savePreset}
-            deletePreset={deletePreset}
-            blocks={blocks}
-            drafts={drafts}
-            setDrafts={setDrafts}
-            addBlock={addBlock}
-            saveBlock={saveBlock}
-            deleteBlock={deleteBlock}
-            onReorder={onReorder}
+            presets={presets}
+            selectedPresetId={selectedPresetId}
+            setSelectedPresetId={setSelectedPresetId}
+            createPreset={createPreset}
+            exportPreset={exportPreset}
+            exportAllPresets={exportAllPresets}
+            importPreset={importPreset}
+            importAllPresets={importAllPresets}
           />
 
-          <PromptStudioPreviewPanel
-            busy={busy}
-            selectedPresetId={selectedPresetId}
-            previewTask={previewTask}
-            setPreviewTask={setPreviewTask}
-            tasks={tasks}
-            previewLoading={previewLoading}
-            runPreview={runPreview}
-            requestId={previewRequestId}
-            preview={preview}
-            templateErrors={templateErrors}
-            renderLog={renderLog}
-          />
+          <div className="grid gap-6">
+            <PromptStudioPresetEditorPanel
+              busy={busy}
+              selectedPresetId={selectedPresetId}
+              tasks={tasks}
+              presetDraftName={presetDraftName}
+              setPresetDraftName={setPresetDraftName}
+              presetDraftActiveFor={presetDraftActiveFor}
+              setPresetDraftActiveFor={setPresetDraftActiveFor}
+              savePreset={savePreset}
+              deletePreset={deletePreset}
+              blocks={blocks}
+              drafts={drafts}
+              setDrafts={setDrafts}
+              addBlock={addBlock}
+              saveBlock={saveBlock}
+              deleteBlock={deleteBlock}
+              onReorder={onReorder}
+            />
+
+            <PromptStudioPreviewPanel
+              busy={busy}
+              selectedPresetId={selectedPresetId}
+              previewTask={previewTask}
+              setPreviewTask={setPreviewTask}
+              tasks={tasks}
+              previewLoading={previewLoading}
+              runPreview={runPreview}
+              requestId={previewRequestId}
+              preview={preview}
+              templateErrors={templateErrors}
+              renderLog={renderLog}
+            />
+          </div>
         </div>
-      </div>
+      </section>
     </div>
   );
 }

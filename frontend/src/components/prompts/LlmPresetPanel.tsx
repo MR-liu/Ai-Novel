@@ -1,7 +1,9 @@
 import { useCallback, useMemo } from "react";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 
+import { FeedbackCallout, FeedbackDisclosure, FeedbackEmptyState } from "../../components/ui/Feedback";
 import type { LLMProfile, LLMProvider, LLMTaskCatalogItem } from "../../types";
+import { describeLlmProvider, formatLlmProviderModel } from "./llmProviderCopy";
 import { describeModelListState, deriveLlmModuleAccessState, type LlmModuleAccessState } from "./llmConnectionState";
 import type { LlmForm, LlmModelListState } from "./types";
 
@@ -135,15 +137,6 @@ function validateExtraJson(
   }
 }
 
-function providerLabel(provider: LLMProvider): string {
-  if (provider === "openai") return "OpenAI Chat";
-  if (provider === "openai_responses") return "OpenAI Responses";
-  if (provider === "openai_compatible") return "OpenAI Compatible Chat";
-  if (provider === "openai_responses_compatible") return "OpenAI Compatible Responses";
-  if (provider === "anthropic") return "Anthropic";
-  return "Gemini";
-}
-
 function maxTokensHint(
   caps: {
     max_tokens_limit: number | null;
@@ -191,9 +184,13 @@ function ModuleEditor(props: ModuleEditorProps) {
         <div className="flex flex-wrap items-center gap-2">{props.headerActions}</div>
       </div>
 
+      <FeedbackCallout className="mt-4 text-xs" title="什么时候该调这里">
+        这一组设置决定“模型从哪里来、怎么回答、允许思考多深”。如果你只是想改文案或片段顺序，不必在这里久留。
+      </FeedbackCallout>
+
       <div className="mt-4 grid gap-4 md:grid-cols-2">
         <label className="grid gap-1">
-          <span className="text-xs text-subtext">服务商（provider）</span>
+          <span className="text-xs text-subtext">模型来源（provider）</span>
           <select
             className="select"
             name={fieldName("provider")}
@@ -213,20 +210,22 @@ function ModuleEditor(props: ModuleEditorProps) {
               }))
             }
           >
-            <option value="openai">openai（官方）</option>
-            <option value="openai_responses">openai_responses（官方 /v1/responses）</option>
-            <option value="openai_compatible">openai_compatible（中转/本地）</option>
-            <option value="openai_responses_compatible">openai_responses_compatible（中转 /v1/responses）</option>
-            <option value="anthropic">anthropic（Claude）</option>
-            <option value="gemini">gemini</option>
+            <option value="openai">OpenAI 官方对话（openai）</option>
+            <option value="openai_responses">OpenAI 官方 Responses（openai_responses）</option>
+            <option value="openai_compatible">通用 OpenAI 对话接口（openai_compatible）</option>
+            <option value="openai_responses_compatible">
+              通用 OpenAI Responses 接口（openai_responses_compatible）
+            </option>
+            <option value="anthropic">Anthropic Claude（anthropic）</option>
+            <option value="gemini">Google Gemini（gemini）</option>
           </select>
           <div className="text-[11px] text-subtext">
-            当前：{providerLabel(props.form.provider)}。兼容网关通常需要可访问的 `base_url`。
+            当前：{describeLlmProvider(props.form.provider)}。只有使用通用接口、本地中转服务或其他中转服务时，通常才需要单独填写服务地址。
           </div>
         </label>
 
         <label className="grid gap-1">
-          <span className="text-xs text-subtext">模型（model）</span>
+          <span className="text-xs text-subtext">模型名称（model）</span>
           <input
             className="input"
             list={`${props.moduleId}_models`}
@@ -246,7 +245,7 @@ function ModuleEditor(props: ModuleEditorProps) {
         </label>
 
         <label className="grid gap-1 md:col-span-2">
-          <span className="text-xs text-subtext">接口地址（base_url）</span>
+          <span className="text-xs text-subtext">服务地址（base_url）</span>
           <input
             className="input"
             disabled={props.saving}
@@ -260,14 +259,19 @@ function ModuleEditor(props: ModuleEditorProps) {
             onChange={(e) => props.setForm((v) => ({ ...v, base_url: e.target.value }))}
           />
           <div className="text-[11px] text-subtext">
-            OpenAI / OpenAI-compatible 一般包含 `/v1`；Anthropic/Gemini 一般为 host。
+            OpenAI 官方接口和通用 OpenAI 接口常见形式是带 `/v1` 的地址；Anthropic Claude 与 Google Gemini 通常只需要主机地址。
           </div>
         </label>
       </div>
 
-      <details className="mt-4 rounded-atelier border border-border/60 bg-canvas px-4 py-3" open={props.dirty}>
-        <summary className="cursor-pointer select-none text-sm font-medium text-ink">高级参数与推理配置</summary>
-        <div className="mt-3 grid gap-4 md:grid-cols-3">
+      <FeedbackDisclosure
+        className="mt-4 rounded-atelier border border-border/60 bg-canvas px-4 py-3"
+        summaryClassName="px-0 py-0 text-sm font-medium text-ink"
+        bodyClassName="pt-3"
+        open={props.dirty}
+        title="高级参数与推理细节（只在需要时调整）"
+      >
+        <div className="grid gap-4 md:grid-cols-3">
           <label className="grid gap-1">
             <span className="text-xs text-subtext">temperature</span>
             <input
@@ -285,7 +289,7 @@ function ModuleEditor(props: ModuleEditorProps) {
             />
           </label>
           <label className="grid gap-1">
-            <span className="text-xs text-subtext">max_tokens / max_output_tokens</span>
+            <span className="text-xs text-subtext">输出长度（max_tokens / max_output_tokens）</span>
             <input
               className="input"
               value={props.form.max_tokens}
@@ -325,7 +329,7 @@ function ModuleEditor(props: ModuleEditorProps) {
           )}
 
           <label className="grid gap-1 md:col-span-2">
-            <span className="text-xs text-subtext">stop（逗号分隔）</span>
+            <span className="text-xs text-subtext">停止词（stop，逗号分隔）</span>
             <input
               className="input"
               value={props.form.stop}
@@ -333,7 +337,7 @@ function ModuleEditor(props: ModuleEditorProps) {
             />
           </label>
           <label className="grid gap-1">
-            <span className="text-xs text-subtext">timeout_seconds</span>
+            <span className="text-xs text-subtext">超时秒数（timeout_seconds）</span>
             <input
               className="input"
               value={props.form.timeout_seconds}
@@ -343,7 +347,7 @@ function ModuleEditor(props: ModuleEditorProps) {
 
           {(props.form.provider === "openai" || props.form.provider === "openai_compatible" || responsesProvider) && (
             <label className="grid gap-1">
-              <span className="text-xs text-subtext">reasoning effort</span>
+              <span className="text-xs text-subtext">推理强度（reasoning effort）</span>
               <select
                 className="select"
                 value={props.form.reasoning_effort}
@@ -360,7 +364,7 @@ function ModuleEditor(props: ModuleEditorProps) {
 
           {responsesProvider && (
             <label className="grid gap-1">
-              <span className="text-xs text-subtext">text verbosity</span>
+              <span className="text-xs text-subtext">文字展开程度（text verbosity）</span>
               <select
                 className="select"
                 value={props.form.text_verbosity}
@@ -382,10 +386,10 @@ function ModuleEditor(props: ModuleEditorProps) {
                   onChange={(e) => props.setForm((v) => ({ ...v, anthropic_thinking_enabled: e.target.checked }))}
                   type="checkbox"
                 />
-                <span className="text-sm text-ink">启用 thinking</span>
+                <span className="text-sm text-ink">启用深度思考</span>
               </label>
               <label className="grid gap-1 md:col-span-2">
-                <span className="text-xs text-subtext">thinking.budget_tokens</span>
+                <span className="text-xs text-subtext">思考预算（thinking.budget_tokens）</span>
                 <input
                   className="input"
                   placeholder="例如 1024"
@@ -399,7 +403,7 @@ function ModuleEditor(props: ModuleEditorProps) {
           {props.form.provider === "gemini" && (
             <>
               <label className="grid gap-1 md:col-span-2">
-                <span className="text-xs text-subtext">thinkingConfig.thinkingBudget</span>
+                <span className="text-xs text-subtext">思考预算（thinkingConfig.thinkingBudget）</span>
                 <input
                   className="input"
                   placeholder="例如 1024"
@@ -413,14 +417,14 @@ function ModuleEditor(props: ModuleEditorProps) {
                   onChange={(e) => props.setForm((v) => ({ ...v, gemini_include_thoughts: e.target.checked }))}
                   type="checkbox"
                 />
-                <span className="text-sm text-ink">thinkingConfig.includeThoughts</span>
+                <span className="text-sm text-ink">返回思考内容（includeThoughts）</span>
               </label>
             </>
           )}
 
           <label className="grid gap-1 md:col-span-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-xs text-subtext">extra（JSON，高级扩展）</span>
+              <span className="text-xs text-subtext">扩展参数（extra JSON，高级）</span>
               <button
                 className="btn btn-secondary btn-sm"
                 disabled={props.saving || !extraValidation.ok}
@@ -437,12 +441,16 @@ function ModuleEditor(props: ModuleEditorProps) {
               onChange={(e) => props.setForm((v) => ({ ...v, extra: e.target.value }))}
             />
             <div className="text-[11px] text-subtext">
-              保留自定义 provider 字段；推理参数建议优先用上面的结构化控件。
+              这里只建议放少量 provider 专属扩展项；常见推理参数优先使用上面的结构化控件。
             </div>
-            {extraErrorText ? <div className="text-xs text-warning">{extraErrorText}</div> : null}
+            {extraErrorText ? (
+              <FeedbackCallout className="text-xs" tone="warning" title="扩展参数 JSON 需要修正">
+                {extraErrorText}
+              </FeedbackCallout>
+            ) : null}
           </label>
         </div>
-      </details>
+      </FeedbackDisclosure>
     </section>
   );
 }
@@ -464,15 +472,45 @@ export function LlmPresetPanel(props: Props) {
     () => describeModelListState(props.mainModelList, mainAccessState),
     [mainAccessState, props.mainModelList],
   );
+  const taskOverrideCount = props.taskModules.length;
+  const selectedProfileName = selectedProfile?.name ?? "未绑定";
 
   return (
     <section className="panel p-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <div className="font-content text-xl text-ink">模型编排配置</div>
+          <div className="font-content text-xl text-ink">模型与调用底座</div>
           <div className="mt-1 text-xs text-subtext">
-            主模型负责默认调用；任务模块可覆盖特定流程（未覆盖则自动回退主模型）。
+            主调用模块决定项目默认怎么调用模型；任务覆盖只在个别流程里单独换模型或参数。
           </div>
+        </div>
+      </div>
+
+      <div className="manuscript-status-list mt-4">
+        <span className="manuscript-chip">主调用：{describeLlmProvider(props.llmForm.provider)}</span>
+        <span className="manuscript-chip">任务覆盖：{taskOverrideCount} 项</span>
+        <span className="manuscript-chip">主连接档案：{selectedProfileName}</span>
+      </div>
+
+      <FeedbackCallout className="mt-4 text-xs" title="怎么理解这一页">
+        记法可以很简单：主调用模块管“默认怎么调用”，任务覆盖管“哪些流程要例外”，连接档案库管“这些配置共用哪套访问密钥和地址”。
+      </FeedbackCallout>
+
+      <div className="mt-4 grid gap-3 lg:grid-cols-3">
+        <div className="surface p-3">
+          <div className="text-xs text-subtext">主调用模块</div>
+          <div className="mt-2 text-sm font-semibold text-ink">适合设定项目默认模型与参数</div>
+          <div className="mt-1 text-xs leading-5 text-subtext">大多数任务都会先走这里。只有当某个流程明显需要例外时，才建议继续往下加任务覆盖。</div>
+        </div>
+        <div className="surface p-3">
+          <div className="text-xs text-subtext">任务覆盖</div>
+          <div className="mt-2 text-sm font-semibold text-ink">适合给特定流程单独换模型</div>
+          <div className="mt-1 text-xs leading-5 text-subtext">例如章节生成、大纲生成或分析任务。如果没有明确理由，尽量别让覆盖越来越多。</div>
+        </div>
+        <div className="surface p-3">
+          <div className="text-xs text-subtext">连接档案库</div>
+          <div className="mt-2 text-sm font-semibold text-ink">适合沉淀可复用的连接与访问密钥</div>
+          <div className="mt-1 text-xs leading-5 text-subtext">把常用网关、模型和访问密钥存成档案，能减少重复输入，也方便多个任务共用同一套连接。</div>
         </div>
       </div>
 
@@ -481,8 +519,8 @@ export function LlmPresetPanel(props: Props) {
         <ModuleEditor
           moduleId="main-module"
           legacyMainFieldNames
-          title="主模块（默认）"
-          subtitle="所有未单独覆盖的任务都会使用这里的 provider/model/参数。"
+          title="主调用模块"
+          subtitle="所有未单独覆盖的任务都会使用这里的模型来源、模型名和参数。"
           form={props.llmForm}
           setForm={props.setLlmForm}
           saving={props.saving || props.profileBusy}
@@ -499,7 +537,7 @@ export function LlmPresetPanel(props: Props) {
                 title={mainAccessState.actionReason ?? undefined}
                 type="button"
               >
-                {props.mainModelList.loading ? "拉取中…" : "拉取模型列表"}
+                {props.mainModelList.loading ? "刷新中…" : "刷新可用模型"}
               </button>
               <button
                 className="btn btn-secondary"
@@ -508,7 +546,7 @@ export function LlmPresetPanel(props: Props) {
                 title={mainAccessState.actionReason ?? undefined}
                 type="button"
               >
-                {props.testing ? "测试中…" : "测试连接"}
+                {props.testing ? "检查中…" : "检查连接"}
               </button>
               <button
                 className="btn btn-primary"
@@ -516,7 +554,7 @@ export function LlmPresetPanel(props: Props) {
                 onClick={props.onSave}
                 type="button"
               >
-                保存主模块
+                保存主设置
               </button>
             </>
           }
@@ -526,9 +564,9 @@ export function LlmPresetPanel(props: Props) {
       <div className="mt-6 rounded-atelier border border-border/70 bg-canvas p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="grid gap-1">
-            <div className="text-sm font-semibold text-ink">任务模块覆盖</div>
+            <div className="text-sm font-semibold text-ink">任务级模型覆盖</div>
             <div className="text-xs text-subtext">
-              按流程拆分模型。每个模块都可绑定独立 API 配置库，未绑定则回退项目主配置。
+              只在某个流程确实需要“例外模型”时才新增。每个覆盖都可绑定独立连接档案，未绑定时会回退主调用模块。
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -538,7 +576,7 @@ export function LlmPresetPanel(props: Props) {
               onChange={(e) => props.onSelectAddTaskKey(e.target.value)}
               disabled={props.addableTasks.length === 0 || props.profileBusy}
             >
-              <option value="">选择要新增的任务模块</option>
+              <option value="">选择要单独覆盖的写作任务</option>
               {props.addableTasks.map((task) => (
                 <option key={task.key} value={task.key}>
                   [{task.group}] {task.label}
@@ -551,15 +589,23 @@ export function LlmPresetPanel(props: Props) {
               onClick={props.onAddTaskModule}
               type="button"
             >
-              新增模块
+              新增任务覆盖
             </button>
           </div>
         </div>
 
+        <div className="manuscript-status-list mt-4">
+          <span className="manuscript-chip">覆盖模块：{taskOverrideCount}</span>
+          <span className="manuscript-chip">{taskOverrideCount ? "优先保持少量、明确的例外" : "当前全部流程都走主调用模块"}</span>
+        </div>
+
         {props.taskModules.length === 0 ? (
-          <div className="mt-4 rounded-atelier border border-dashed border-border p-4 text-xs text-subtext">
-            暂无任务级覆盖。当前所有流程都使用主模块。
-          </div>
+          <FeedbackEmptyState
+            className="mt-4 rounded-atelier border border-dashed border-border"
+            variant="compact"
+            title="当前没有任务级覆盖"
+            description="所有流程都会走主调用模块，这通常也是最容易维护的状态。"
+          />
         ) : (
           <div className="mt-4 grid gap-4">
             {props.taskModules.map((task) => {
@@ -586,7 +632,7 @@ export function LlmPresetPanel(props: Props) {
                         [{task.group}] {task.label}
                       </div>
                       <div className="text-xs text-subtext">{task.description}</div>
-                      <div className="text-[11px] text-subtext">任务键：{task.task_key}</div>
+                      <div className="text-[11px] text-subtext">任务键：{task.task_key}，这条覆盖只影响当前流程。</div>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       {task.dirty ? (
@@ -599,7 +645,7 @@ export function LlmPresetPanel(props: Props) {
                         title={taskAccessState.actionReason ?? undefined}
                         type="button"
                       >
-                        {task.modelList.loading ? "拉取中…" : "拉取模型列表"}
+                        {task.modelList.loading ? "刷新中…" : "刷新模型"}
                       </button>
                       <button
                         className="btn btn-secondary btn-sm"
@@ -608,7 +654,7 @@ export function LlmPresetPanel(props: Props) {
                         title={taskAccessState.actionReason ?? undefined}
                         type="button"
                       >
-                        {testing ? "测试中…" : "测试连接"}
+                        {testing ? "检查中…" : "检查连接"}
                       </button>
                       <button
                         className="btn btn-primary btn-sm"
@@ -616,7 +662,7 @@ export function LlmPresetPanel(props: Props) {
                         onClick={() => props.onSaveTask(task.task_key)}
                         type="button"
                       >
-                        {task.saving ? "保存中..." : "保存模块"}
+                        {task.saving ? "保存中..." : "保存覆盖"}
                       </button>
                       <button
                         className="btn btn-ghost btn-sm text-accent hover:bg-accent/10"
@@ -624,7 +670,7 @@ export function LlmPresetPanel(props: Props) {
                         onClick={() => props.onDeleteTask(task.task_key)}
                         type="button"
                       >
-                        {task.deleting ? "删除中..." : "删除模块"}
+                        {task.deleting ? "删除中..." : "删除覆盖"}
                       </button>
                     </div>
                   </div>
@@ -632,31 +678,31 @@ export function LlmPresetPanel(props: Props) {
                   <RemoteStateNotice state={taskAccessState} className="mb-3" />
 
                   <div className="mb-3 grid gap-1">
-                    <span className="text-xs text-subtext">任务模块绑定的 API 配置库</span>
+                    <span className="text-xs text-subtext">为该任务绑定连接档案</span>
                     <select
                       className="select"
                       value={task.llm_profile_id ?? ""}
                       onChange={(e) => props.onTaskProfileChange(task.task_key, e.target.value || null)}
                       disabled={taskUiLocked}
                     >
-                      <option value="">（回退主配置）</option>
+                      <option value="">（回退主连接档案）</option>
                       {props.profiles.map((profile) => (
                         <option key={`${task.task_key}-${profile.id}`} value={profile.id}>
-                          {profile.name} · {profile.provider}/{profile.model}
+                          {profile.name} · {formatLlmProviderModel(profile.provider, profile.model)}
                         </option>
                       ))}
                     </select>
                     <div className="text-[11px] text-subtext">
-                      选择后该任务优先使用该配置库的 API Key。留空表示继承项目主配置绑定的 API Key。
+                      选择后，这个任务会优先使用该连接档案里的访问密钥和模型信息；留空表示继承项目主连接档案。
                     </div>
                     {effectiveProfile ? (
                       <>
                         <div className="text-[11px] text-subtext">
-                          当前生效配置：{effectiveProfile.name}（{effectiveProfile.provider}/{effectiveProfile.model}）
-                          {!boundProfile ? "，来源：主配置回退" : "，来源：任务绑定配置"}
+                          当前生效连接档案：{effectiveProfile.name}（{formatLlmProviderModel(effectiveProfile.provider, effectiveProfile.model)}）
+                          {!boundProfile ? "，来源：主连接档案回退" : "，来源：任务绑定档案"}
                           {effectiveProfile.has_api_key
-                            ? `，已保存 Key：${effectiveProfile.masked_api_key ?? "（已保存）"}`
-                            : "，尚未保存 Key"}
+                            ? `，已保存访问密钥：${effectiveProfile.masked_api_key ?? "（已保存）"}`
+                            : "，尚未保存访问密钥"}
                         </div>
                         <div className="mt-1 flex flex-wrap gap-2">
                           <input
@@ -664,8 +710,8 @@ export function LlmPresetPanel(props: Props) {
                             disabled={taskUiLocked}
                             placeholder={
                               boundProfile
-                                ? "输入该任务绑定配置库的新 Key（共享给复用该配置库的模块）"
-                                : "输入主配置的新 Key（将影响回退到主配置的任务）"
+                                ? "输入这条任务覆盖绑定档案的新访问密钥（会影响共用这份档案的任务）"
+                                : "输入主连接档案的新访问密钥（会影响回退到主连接档案的任务）"
                             }
                             type="password"
                             value={props.taskApiKeyDrafts[task.task_key] ?? ""}
@@ -677,7 +723,7 @@ export function LlmPresetPanel(props: Props) {
                             onClick={() => props.onSaveTaskApiKey(task.task_key)}
                             type="button"
                           >
-                            保存 Key
+                            保存访问密钥
                           </button>
                           <button
                             className="btn btn-secondary btn-sm"
@@ -685,21 +731,21 @@ export function LlmPresetPanel(props: Props) {
                             onClick={() => props.onClearTaskApiKey(task.task_key)}
                             type="button"
                           >
-                            清除 Key
+                            清除访问密钥
                           </button>
                         </div>
                       </>
                     ) : (
                       <div className="text-[11px] text-subtext">
-                        当前未绑定任务配置且项目主配置为空，请先绑定配置库或设置主配置。
+                        当前没有可用的连接档案可回退，请先为这条任务覆盖绑定档案，或先设置主连接档案。
                       </div>
                     )}
                   </div>
 
                   <ModuleEditor
                     moduleId={`task-${task.task_key}`}
-                    title="模块参数"
-                    subtitle="该任务专属模型参数。"
+                    title="该任务的模型参数"
+                    subtitle="这里只影响这个任务；没有单独改动的地方会回退主调用模块。"
                     form={task.form}
                     setForm={(updater) => props.onTaskFormChange(task.task_key, updater)}
                     saving={taskUiLocked}
@@ -717,10 +763,13 @@ export function LlmPresetPanel(props: Props) {
       </div>
 
       <div className="surface mt-6 p-4">
-        <div className="text-sm text-ink">API 配置库（后端持久化）</div>
+        <div className="text-sm text-ink">连接档案库（后端保存）</div>
+        <div className="mt-2 text-xs leading-6 text-subtext">
+          这里保存的是可复用的连接档案。你可以把常用网关、模型和访问密钥绑在一起，供主调用模块或任务覆盖重复使用。
+        </div>
         <div className="mt-2 grid gap-3 sm:grid-cols-3">
           <label className="grid gap-1 sm:col-span-2">
-            <span className="text-xs text-subtext">选择主配置</span>
+            <span className="text-xs text-subtext">选择主连接档案</span>
             <select
               className="select"
               name="profile_select"
@@ -728,16 +777,16 @@ export function LlmPresetPanel(props: Props) {
               disabled={props.profileBusy}
               onChange={(e) => props.onSelectProfile(e.target.value ? e.target.value : null)}
             >
-              <option value="">（未绑定后端配置）</option>
+              <option value="">（未绑定连接档案）</option>
               {props.profiles.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.name} · {p.provider}/{p.model}
+                  {p.name} · {formatLlmProviderModel(p.provider, p.model)}
                 </option>
               ))}
             </select>
           </label>
           <label className="grid gap-1 sm:col-span-1">
-            <span className="text-xs text-subtext">新建配置名</span>
+            <span className="text-xs text-subtext">新建档案名</span>
             <input
               className="input"
               disabled={props.profileBusy}
@@ -751,11 +800,11 @@ export function LlmPresetPanel(props: Props) {
 
         {selectedProfile ? (
           <div className="mt-3 text-xs text-subtext">
-            当前主配置：{selectedProfile.name}（{selectedProfile.provider}/{selectedProfile.model}）
+            当前主连接档案：{selectedProfile.name}（{formatLlmProviderModel(selectedProfile.provider, selectedProfile.model)}）
           </div>
         ) : (
           <div className="mt-3 text-xs text-subtext">
-            当前主配置：未绑定。任务模块若也未绑定配置库，将无法调用模型。
+            当前主连接档案：未绑定。若任务覆盖也没有绑定连接档案，就无法真正调用模型。
           </div>
         )}
 
@@ -766,7 +815,7 @@ export function LlmPresetPanel(props: Props) {
             onClick={props.onCreateProfile}
             type="button"
           >
-            保存为新配置
+            保存为新档案
           </button>
           <button
             className="btn btn-secondary px-3 py-2 text-xs"
@@ -774,7 +823,7 @@ export function LlmPresetPanel(props: Props) {
             onClick={props.onUpdateProfile}
             type="button"
           >
-            更新当前配置
+            更新当前档案
           </button>
           <button
             className="btn btn-ghost px-3 py-2 text-xs text-accent hover:bg-accent/10"
@@ -782,36 +831,36 @@ export function LlmPresetPanel(props: Props) {
             onClick={props.onDeleteProfile}
             type="button"
           >
-            删除当前配置
+            删除当前档案
           </button>
         </div>
       </div>
 
       <div className="surface mt-4 p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="text-sm text-ink">API Key（后端加密）</div>
+          <div className="text-sm text-ink">访问密钥（API Key，后端加密保存）</div>
           <button
             className="btn btn-secondary px-3 py-2 text-xs"
             disabled={!props.selectedProfileId || props.profileBusy || !selectedProfile?.has_api_key}
             onClick={props.onClearApiKey}
             type="button"
           >
-            清除 Key
+            清除访问密钥
           </button>
         </div>
         <div className="mt-2 text-xs text-subtext">
           {mainAccessState.stage === "ready"
-            ? `已就绪：${selectedProfile?.masked_api_key ?? "（已保存）"}。现在可以拉取模型列表并测试连接。`
+            ? `已就绪：${selectedProfile?.masked_api_key ?? "（已保存）"}。现在可以刷新模型列表并做连接检查。`
             : mainAccessState.stage === "missing_key"
-              ? "已绑定 profile，但还没有保存 Key。保存后才能拉取模型列表和测试连接。"
+              ? "已绑定连接档案，但还没有保存访问密钥。保存后才能刷新模型列表并做连接检查。"
               : mainAccessState.stage === "missing_profile"
-                ? "请先选择/新建一个 profile，再保存 Key。"
-                : "当前模块 provider 与已绑定 profile 不一致；先统一 provider，再保存或测试。"}
+                ? "请先选择或新建一个连接档案，再保存访问密钥。"
+                : "当前模块的模型来源与已绑定连接档案不一致；先统一两边，再保存或测试。"}
         </div>
         <div className="mt-2 flex gap-2">
           <input
             className="input flex-1"
-            placeholder="输入新 Key（不会回显已保存 Key）"
+            placeholder="输入新的访问密钥（API Key，已保存值不会回显）"
             name="api_key"
             type="password"
             value={props.apiKey}
@@ -823,7 +872,7 @@ export function LlmPresetPanel(props: Props) {
             onClick={props.onSaveApiKey}
             type="button"
           >
-            保存 Key
+            保存访问密钥
           </button>
         </div>
       </div>
