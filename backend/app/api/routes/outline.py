@@ -985,6 +985,32 @@ def _write_outline_segmented_aggregate_run(
     )
 
 
+def _build_outline_segmented_result_data(
+    *,
+    segmented: _OutlineSegmentGenerationResult,
+    aggregate_run_id: str,
+) -> dict[str, object]:
+    data = dict(segmented.data)
+    warnings = _dedupe_warnings(segmented.warnings)
+    if warnings:
+        data["warnings"] = warnings
+    if segmented.parse_error is not None:
+        data["parse_error"] = segmented.parse_error
+    data["generation_run_id"] = aggregate_run_id
+    if segmented.run_ids:
+        data["generation_sub_run_ids"] = segmented.run_ids
+        data["generation_run_ids"] = [aggregate_run_id, *segmented.run_ids]
+    if segmented.latency_ms > 0:
+        data["latency_ms"] = segmented.latency_ms
+    if segmented.dropped_params:
+        data["dropped_params"] = segmented.dropped_params
+    if segmented.finish_reasons:
+        data["finish_reason"] = segmented.finish_reasons[-1]
+        data["finish_reasons"] = segmented.finish_reasons
+    data["segmented_generation"] = segmented.meta
+    return data
+
+
 def _dedupe_warnings(values: list[str]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -2240,24 +2266,7 @@ def generate_outline(
             segmented_run_ids=segmented.run_ids,
             meta=segmented.meta,
         )
-        data = dict(segmented.data)
-        warnings = _dedupe_warnings(segmented.warnings)
-        if warnings:
-            data["warnings"] = warnings
-        if segmented.parse_error is not None:
-            data["parse_error"] = segmented.parse_error
-        data["generation_run_id"] = aggregate_run_id
-        if segmented.run_ids:
-            data["generation_sub_run_ids"] = segmented.run_ids
-            data["generation_run_ids"] = [aggregate_run_id, *segmented.run_ids]
-        if segmented.latency_ms > 0:
-            data["latency_ms"] = segmented.latency_ms
-        if segmented.dropped_params:
-            data["dropped_params"] = segmented.dropped_params
-        if segmented.finish_reasons:
-            data["finish_reason"] = segmented.finish_reasons[-1]
-            data["finish_reasons"] = segmented.finish_reasons
-        data["segmented_generation"] = segmented.meta
+        data = _build_outline_segmented_result_data(segmented=segmented, aggregate_run_id=aggregate_run_id)
         return ok_payload(request_id=request_id, data=data)
 
     llm_result = call_llm_and_record(
@@ -2541,24 +2550,7 @@ def generate_outline_stream(
                 segmented_run_ids=segmented.run_ids,
                 meta=segmented.meta,
             )
-            data = dict(segmented.data)
-            warnings = _dedupe_warnings(segmented.warnings)
-            if warnings:
-                data["warnings"] = warnings
-            if segmented.parse_error is not None:
-                data["parse_error"] = segmented.parse_error
-            data["generation_run_id"] = aggregate_run_id
-            if segmented.run_ids:
-                data["generation_sub_run_ids"] = segmented.run_ids
-                data["generation_run_ids"] = [aggregate_run_id, *segmented.run_ids]
-            if segmented.latency_ms > 0:
-                data["latency_ms"] = segmented.latency_ms
-            if segmented.dropped_params:
-                data["dropped_params"] = segmented.dropped_params
-            if segmented.finish_reasons:
-                data["finish_reason"] = segmented.finish_reasons[-1]
-                data["finish_reasons"] = segmented.finish_reasons
-            data["segmented_generation"] = segmented.meta
+            data = _build_outline_segmented_result_data(segmented=segmented, aggregate_run_id=aggregate_run_id)
 
             result_data = dict(data)
             result_data.pop("raw_output", None)
