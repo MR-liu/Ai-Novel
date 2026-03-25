@@ -12,7 +12,6 @@ import { ProjectsProvider } from "./contexts/ProjectsContext";
 import { importWithChunkRetry } from "./lib/lazyImportRetry";
 import { LEGACY_PROJECT_REDIRECTS } from "./lib/legacyProjectRedirects";
 import { buildProjectHomePath } from "./lib/projectRoutes";
-import { GlobalProjectImportPage } from "./pages/GlobalProjectImportPage";
 import { LegacyProjectRouteRedirect } from "./pages/LegacyProjectRouteRedirect";
 import { RouteErrorPage } from "./pages/RouteErrorPage";
 
@@ -34,6 +33,11 @@ const DashboardPage = lazy(async () => {
 const AdminUsersPage = lazy(async () => {
   const mod = await importWithChunkRetry(() => import("./pages/AdminUsersPage"));
   return { default: mod.AdminUsersPage };
+});
+
+const GlobalProjectImportPage = lazy(async () => {
+  const mod = await importWithChunkRetry(() => import("./pages/GlobalProjectImportPage"));
+  return { default: mod.GlobalProjectImportPage };
 });
 
 const ProjectHomePage = lazy(async () => {

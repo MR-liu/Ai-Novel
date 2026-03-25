@@ -1,10 +1,9 @@
 import clsx from "clsx";
 import { BookOpen, ChevronLeft, Edit3, List, StickyNote } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import ReactMarkdown from "react-markdown";
 import { useNavigate, useParams } from "react-router-dom";
-import remarkGfm from "remark-gfm";
 
+import { LazyMarkdownRenderer } from "../components/atelier/LazyMarkdownRenderer";
 import { WizardNextBar } from "../components/atelier/WizardNextBar";
 import { PaperContent } from "../components/layout/AppShell";
 import { EditorialHero } from "../components/layout/AuthorPageScaffold";
@@ -346,11 +345,12 @@ export function PreviewPage() {
                 </div>
 
                 <article className="manuscript-paper px-5 py-8 sm:px-8 lg:px-12">
-                  <div className="atelier-content mx-auto max-w-4xl text-ink">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {loadingChapter ? "_(loading...)_" : activeChapter?.content_md || "_（空）_"}
-                    </ReactMarkdown>
-                  </div>
+                  <LazyMarkdownRenderer
+                    className="atelier-content mx-auto max-w-4xl text-ink"
+                    fallbackClassName="min-h-[240px]"
+                    fallbackText="正在加载正文渲染器…"
+                    content={loadingChapter ? "_(loading...)_" : activeChapter?.content_md || "_（空）_"}
+                  />
                 </article>
               </>
             ) : (

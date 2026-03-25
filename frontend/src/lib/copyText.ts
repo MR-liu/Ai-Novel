@@ -1,14 +1,14 @@
 import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 
-import { CopyFallbackModal } from "../components/ui/CopyFallbackModal";
+import { importWithChunkRetry } from "./lazyImportRetry";
 
 export type CopyTextOptions = {
   title?: string;
   description?: string;
 };
 
-function showCopyFallbackModal(text: string, opts: CopyTextOptions | undefined): void {
+async function showCopyFallbackModal(text: string, opts: CopyTextOptions | undefined): Promise<void> {
   if (typeof document === "undefined") return;
 
   const container = document.createElement("div");
@@ -21,8 +21,9 @@ function showCopyFallbackModal(text: string, opts: CopyTextOptions | undefined):
     container.remove();
   };
 
+  const mod = await importWithChunkRetry(() => import("../components/ui/CopyFallbackModal"));
   root.render(
-    createElement(CopyFallbackModal, {
+    createElement(mod.CopyFallbackModal, {
       text,
       title: opts?.title ?? "复制失败，请手动复制",
       description: opts?.description ?? "浏览器拒绝访问 Clipboard API。你可以在下面文本框中手动复制。",
@@ -44,6 +45,6 @@ export async function copyText(text: string, opts?: CopyTextOptions): Promise<bo
     // noop
   }
 
-  showCopyFallbackModal(safeText, opts);
+  await showCopyFallbackModal(safeText, opts);
   return false;
 }

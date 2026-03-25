@@ -1,8 +1,13 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { Suspense, lazy, useCallback, useMemo, useRef, useState } from "react";
 
-import { Modal } from "./Modal";
 import { ConfirmContext } from "./confirm";
 import type { ChooseOptions, ConfirmApi, ConfirmChoice, ConfirmOptions } from "./confirm";
+import { importWithChunkRetry } from "../../lib/lazyImportRetry";
+
+const LazyConfirmDialog = lazy(async () => {
+  const mod = await importWithChunkRetry(() => import("./ConfirmDialog"));
+  return { default: mod.ConfirmDialog };
+});
 
 export function ConfirmProvider(props: { children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -41,44 +46,11 @@ export function ConfirmProvider(props: { children: React.ReactNode }) {
   return (
     <ConfirmContext.Provider value={api}>
       {props.children}
-      <Modal
-        open={open && Boolean(options)}
-        onClose={() => close(variant === "choose" ? ("cancel" satisfies ConfirmChoice) : false)}
-        panelClassName="surface max-w-md p-5"
-        ariaLabel={options?.title ?? "确认"}
-      >
-        {options ? (
-          <>
-            <div className="font-content text-xl text-ink">{options.title}</div>
-            {options.description ? <div className="mt-2 text-sm text-subtext">{options.description}</div> : null}
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                className="btn btn-secondary"
-                onClick={() => close(variant === "choose" ? ("cancel" satisfies ConfirmChoice) : false)}
-                type="button"
-              >
-                {options.cancelText ?? "取消"}
-              </button>
-              {variant === "choose" ? (
-                <button
-                  className={(options as ChooseOptions).secondaryDanger ? "btn btn-danger" : "btn btn-secondary"}
-                  onClick={() => close("secondary" satisfies ConfirmChoice)}
-                  type="button"
-                >
-                  {(options as ChooseOptions).secondaryText}
-                </button>
-              ) : null}
-              <button
-                className={options.danger ? "btn btn-danger" : "btn btn-primary"}
-                onClick={() => close(variant === "choose" ? ("confirm" satisfies ConfirmChoice) : true)}
-                type="button"
-              >
-                {options.confirmText ?? "确认"}
-              </button>
-            </div>
-          </>
-        ) : null}
-      </Modal>
+      {options ? (
+        <Suspense fallback={null}>
+          <LazyConfirmDialog open={open} variant={variant} options={options} onClose={close} />
+        </Suspense>
+      ) : null}
     </ConfirmContext.Provider>
   );
 }

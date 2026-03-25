@@ -1,21 +1,18 @@
 import clsx from "clsx";
-import { AnimatePresence, LayoutGroup, motion, useReducedMotion } from "framer-motion";
+import { Suspense, lazy, useEffect, useMemo, useState, type ReactNode } from "react";
 import { CircleHelp, LayoutDashboard, PanelLeftClose, PanelLeftOpen, UserCog } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate, useOutlet, useParams } from "react-router-dom";
 
 import { useAppMode } from "../../contexts/AppModeContext";
 import { useAuth } from "../../contexts/auth";
 import { PersistentOutletProvider } from "../../hooks/PersistentOutletProvider";
-import { transition } from "../../lib/motion";
+import { importWithChunkRetry } from "../../lib/lazyImportRetry";
 import type { RouteLayout } from "../../lib/routes";
 import { resolveRouteMeta } from "../../lib/routes";
 import { UI_COPY } from "../../lib/uiCopy";
 import { getCurrentUserId } from "../../services/currentUser";
 import { sidebarCollapsedStorageKey } from "../../services/uiState";
-import { ProjectSwitcher } from "../atelier/ProjectSwitcher";
 import { ThemeToggle } from "../atelier/ThemeToggle";
-import { Drawer } from "../ui/Drawer";
 import { ModeSelectionPanel } from "./AuthorPageScaffold";
 import {
   APP_SHELL_PROJECT_NAV_SECTION_TITLES,
@@ -23,6 +20,16 @@ import {
   getAppShellProjectNavSections,
   type AppShellProjectNavSection,
 } from "./appShellNavConfig";
+
+const LazyAppShellHelpDrawer = lazy(async () => {
+  const mod = await importWithChunkRetry(() => import("./AppShellHelpDrawer"));
+  return { default: mod.AppShellHelpDrawer };
+});
+
+const LazyProjectSwitcher = lazy(async () => {
+  const mod = await importWithChunkRetry(() => import("../atelier/ProjectSwitcher"));
+  return { default: mod.ProjectSwitcher };
+});
 
 function useSidebarCollapsed(): [boolean, (v: boolean) => void] {
   const storageKey = sidebarCollapsedStorageKey(getCurrentUserId());
@@ -50,7 +57,9 @@ function SidebarLink(props: {
         clsx(
           "ui-focus-ring ui-transition-fast group relative flex w-full items-center overflow-hidden rounded-atelier py-2 text-sm no-underline hover:no-underline",
           props.collapsed ? "justify-center px-0" : "justify-start gap-3 px-3",
-          isActive ? "text-ink" : "text-subtext hover:bg-canvas/80 hover:text-ink",
+          isActive
+            ? "border border-accent/20 bg-canvas/92 text-ink shadow-sm"
+            : "text-subtext hover:bg-canvas/80 hover:text-ink",
         )
       }
       to={props.to}
@@ -58,19 +67,8 @@ function SidebarLink(props: {
       title={props.collapsed ? props.label : undefined}
       onClick={props.onClick}
     >
-      {({ isActive }) => (
-        <>
-          {isActive ? (
-            <motion.span
-              layoutId="atelier-sidebar-active"
-              className="absolute inset-0 rounded-atelier border border-accent/20 bg-canvas/92 shadow-sm"
-              transition={transition.fast}
-            />
-          ) : null}
-          <span className="relative z-10 shrink-0">{props.icon}</span>
-          {props.collapsed ? null : <span className="relative z-10 min-w-0 truncate">{props.label}</span>}
-        </>
-      )}
+      <span className="relative z-10 shrink-0">{props.icon}</span>
+      {props.collapsed ? null : <span className="relative z-10 min-w-0 truncate">{props.label}</span>}
     </NavLink>
   );
 }
@@ -210,6 +208,14 @@ type ContentContainerProps = {
   className?: string;
 };
 
+function ProjectSwitcherFallback() {
+  return (
+    <div className="rounded-atelier border border-border bg-canvas/70 p-3 text-xs text-subtext">
+      正在加载项目切换器…
+    </div>
+  );
+}
+
 export function PaperContent(props: ContentContainerProps) {
   return <div className={clsx("mx-auto w-full max-w-[var(--layout-author-max)]", props.className)}>{props.children}</div>;
 }
@@ -287,7 +293,6 @@ export function AppShell() {
   const [helpOpen, setHelpOpen] = useState(false);
   const { projectId } = useParams();
   const location = useLocation();
-  const reduceMotion = useReducedMotion();
 
   const pathname = location.pathname;
   const routeMeta = useMemo(() => resolveRouteMeta(pathname), [pathname]);
@@ -325,121 +330,109 @@ export function AppShell() {
   return (
     <div className="app-shell min-h-screen bg-canvas text-ink" data-app-mode={shellMode} data-route-layout={routeMeta.layout}>
       <div className="flex">
-        <AnimatePresence>
-          {mobileNavOpen ? (
-            <motion.div
-              className="fixed inset-0 z-50 flex bg-black/30 lg:hidden"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={reduceMotion ? { duration: 0.01 } : transition.base}
-              onClick={(e) => {
-                if (e.target === e.currentTarget) closeMobileNav();
-              }}
-              role="dialog"
-              aria-modal="true"
-              aria-label={UI_COPY.nav.navMenu}
-            >
-              <motion.aside
-                className="h-full w-[300px] shrink-0 overflow-x-hidden border-r border-border bg-[rgb(var(--color-sidebar-bg)/0.96)] p-4 shadow-2xl backdrop-blur-xl"
-                initial={{ x: -12, opacity: 0 }}
-                animate={{ x: 0, opacity: 1 }}
-                exit={{ x: -12, opacity: 0 }}
-                transition={reduceMotion ? { duration: 0.01 } : transition.base}
-              >
-                <div className="panel p-3">
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <div className="text-[11px] uppercase tracking-[0.2em] text-subtext">{shellModeTitle}</div>
-                      <div className="mt-1 font-content text-lg text-ink">{UI_COPY.brand.appName}</div>
-                      <div className="mt-1 text-xs leading-5 text-subtext">{shellModeSubtitle}</div>
-                    </div>
-                    <button
-                      className="btn btn-secondary btn-icon"
-                      onClick={closeMobileNav}
-                      aria-label={UI_COPY.nav.closeNav}
-                      title={UI_COPY.nav.closeNav}
-                      type="button"
-                    >
-                      <PanelLeftClose size={18} />
-                    </button>
+        {mobileNavOpen ? (
+          <div
+            className="fixed inset-0 z-50 flex bg-black/30 lg:hidden"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) closeMobileNav();
+            }}
+            role="dialog"
+            aria-modal="true"
+            aria-label={UI_COPY.nav.navMenu}
+          >
+            <aside className="h-full w-[300px] shrink-0 overflow-x-hidden border-r border-border bg-[rgb(var(--color-sidebar-bg)/0.96)] p-4 shadow-2xl backdrop-blur-xl">
+              <div className="panel p-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="text-[11px] uppercase tracking-[0.2em] text-subtext">{shellModeTitle}</div>
+                    <div className="mt-1 font-content text-lg text-ink">{UI_COPY.brand.appName}</div>
+                    <div className="mt-1 text-xs leading-5 text-subtext">{shellModeSubtitle}</div>
                   </div>
+                  <button
+                    className="btn btn-secondary btn-icon"
+                    onClick={closeMobileNav}
+                    aria-label={UI_COPY.nav.closeNav}
+                    title={UI_COPY.nav.closeNav}
+                    type="button"
+                  >
+                    <PanelLeftClose size={18} />
+                  </button>
                 </div>
+              </div>
 
-                <div className="mt-4 rounded-atelier border border-border bg-canvas/70 p-3 text-xs text-subtext">
-                  <div className="text-[11px] uppercase tracking-[0.16em]">{routeContext.label}</div>
-                  <div className="mt-2 leading-5">{routeContext.copy}</div>
-                </div>
+              <div className="mt-4 rounded-atelier border border-border bg-canvas/70 p-3 text-xs text-subtext">
+                <div className="text-[11px] uppercase tracking-[0.16em]">{routeContext.label}</div>
+                <div className="mt-2 leading-5">{routeContext.copy}</div>
+              </div>
 
-                <div className="mt-4">
-                  <ProjectSwitcher />
-                </div>
+              <div className="mt-4">
+                <Suspense fallback={<ProjectSwitcherFallback />}>
+                  <LazyProjectSwitcher />
+                </Suspense>
+              </div>
 
-                <div className="mt-4 flex items-center justify-between gap-2 rounded-atelier border border-border bg-canvas/80 p-2">
-                  <ModeSwitch compact />
-                  <ThemeToggle />
-                </div>
+              <div className="mt-4 flex items-center justify-between gap-2 rounded-atelier border border-border bg-canvas/80 p-2">
+                <ModeSwitch compact />
+                <ThemeToggle />
+              </div>
 
-                <LayoutGroup id="atelier-sidebar-mobile">
-                  <nav className="mt-4 flex flex-col gap-1">
-                    <SidebarLink
-                      collapsed={false}
-                      icon={<LayoutDashboard size={18} />}
-                      label={UI_COPY.nav.home}
-                      ariaLabel="首页 (nav_home)"
-                      to="/"
-                      onClick={closeMobileNav}
-                    />
-                    <SidebarButton
-                      collapsed={false}
-                      icon={<CircleHelp size={18} />}
-                      label={UI_COPY.nav.help}
-                      ariaLabel="术语/帮助 (nav_help)"
-                      onClick={() => {
-                        closeMobileNav();
-                        openHelp();
-                      }}
-                    />
-                    <div className="my-2 h-px bg-border" />
-                    {projectId && selectionState !== "unset" ? (
-                      navSections.map((section, index) => (
-                        <div key={section}>
-                          <ProjectNavGroupTitle
-                            collapsed={false}
-                            className={index === 0 ? undefined : "mt-2"}
-                            label={APP_SHELL_PROJECT_NAV_SECTION_TITLES[section]}
-                          />
-                          {renderProjectNavItems({
-                            section,
-                            projectId,
-                            collapsed: false,
-                            onClick: closeMobileNav,
-                          })}
-                        </div>
-                      ))
-                    ) : (
-                      <div className="rounded-atelier border border-border bg-canvas p-3 text-xs text-subtext">
-                        {selectionState === "unset" ? "请先选择模式，再进入项目导航。" : UI_COPY.nav.chooseProjectHint}
-                      </div>
-                    )}
-                    <div className="my-2 h-px bg-border" />
-                    <div className="px-3 pt-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-subtext">
-                      {UI_COPY.nav.groupAdmin}
+              <nav className="mt-4 flex flex-col gap-1">
+                <SidebarLink
+                  collapsed={false}
+                  icon={<LayoutDashboard size={18} />}
+                  label={UI_COPY.nav.home}
+                  ariaLabel="首页 (nav_home)"
+                  to="/"
+                  onClick={closeMobileNav}
+                />
+                <SidebarButton
+                  collapsed={false}
+                  icon={<CircleHelp size={18} />}
+                  label={UI_COPY.nav.help}
+                  ariaLabel="术语/帮助 (nav_help)"
+                  onClick={() => {
+                    closeMobileNav();
+                    openHelp();
+                  }}
+                />
+                <div className="my-2 h-px bg-border" />
+                {projectId && selectionState !== "unset" ? (
+                  navSections.map((section, index) => (
+                    <div key={section}>
+                      <ProjectNavGroupTitle
+                        collapsed={false}
+                        className={index === 0 ? undefined : "mt-2"}
+                        label={APP_SHELL_PROJECT_NAV_SECTION_TITLES[section]}
+                      />
+                      {renderProjectNavItems({
+                        section,
+                        projectId,
+                        collapsed: false,
+                        onClick: closeMobileNav,
+                      })}
                     </div>
-                    <SidebarLink
-                      collapsed={false}
-                      icon={<UserCog size={18} />}
-                      label={UI_COPY.nav.adminUsers}
-                      ariaLabel="用户管理 (nav_admin_users)"
-                      to="/admin/users"
-                      onClick={closeMobileNav}
-                    />
-                  </nav>
-                </LayoutGroup>
-              </motion.aside>
-            </motion.div>
-          ) : null}
-        </AnimatePresence>
+                  ))
+                ) : (
+                  <div className="rounded-atelier border border-border bg-canvas p-3 text-xs text-subtext">
+                    {selectionState === "unset" ? "请先选择模式，再进入项目导航。" : UI_COPY.nav.chooseProjectHint}
+                  </div>
+                )}
+                <div className="my-2 h-px bg-border" />
+                <div className="px-3 pt-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-subtext">
+                  {UI_COPY.nav.groupAdmin}
+                </div>
+                <SidebarLink
+                  collapsed={false}
+                  icon={<UserCog size={18} />}
+                  label={UI_COPY.nav.adminUsers}
+                  ariaLabel="用户管理 (nav_admin_users)"
+                  to="/admin/users"
+                  onClick={closeMobileNav}
+                />
+              </nav>
+            </aside>
+          </div>
+        ) : null}
 
         <aside
           className={clsx(
@@ -477,70 +470,70 @@ export function AppShell() {
           </div>
 
           <div className={clsx("mt-4", collapsed && "hidden")}>
-            <ProjectSwitcher />
+            <Suspense fallback={<ProjectSwitcherFallback />}>
+              <LazyProjectSwitcher />
+            </Suspense>
           </div>
 
           <div className={clsx("mt-4", collapsed && "hidden")}>
             <ModeSwitch />
           </div>
 
-          <LayoutGroup id="atelier-sidebar-desktop">
-            <nav className="mt-4 flex flex-col gap-1">
-              <SidebarLink
-                collapsed={collapsed}
-                icon={<LayoutDashboard size={18} />}
-                label={UI_COPY.nav.home}
-                ariaLabel="首页 (nav_home)"
-                to="/"
-              />
-              <SidebarButton
-                collapsed={collapsed}
-                icon={<CircleHelp size={18} />}
-                label={UI_COPY.nav.help}
-                ariaLabel="术语/帮助 (nav_help)"
-                onClick={openHelp}
-              />
-              <div className="my-2 h-px bg-border" />
-              {projectId && selectionState !== "unset" ? (
-                navSections.map((section, index) => (
-                  <div key={section}>
-                    <ProjectNavGroupTitle
-                      collapsed={collapsed}
-                      className={index === 0 ? undefined : "mt-2"}
-                      label={APP_SHELL_PROJECT_NAV_SECTION_TITLES[section]}
-                    />
-                    {renderProjectNavItems({
-                      section,
-                      projectId,
-                      collapsed,
-                    })}
-                  </div>
-                ))
-              ) : (
-                <div
-                  className={clsx(
-                    "rounded-atelier border border-border bg-canvas p-3 text-xs text-subtext",
-                    collapsed && "hidden",
-                  )}
-                >
-                  {selectionState === "unset" ? "请先选择模式，再进入项目导航。" : UI_COPY.nav.chooseProjectHint}
+          <nav className="mt-4 flex flex-col gap-1">
+            <SidebarLink
+              collapsed={collapsed}
+              icon={<LayoutDashboard size={18} />}
+              label={UI_COPY.nav.home}
+              ariaLabel="首页 (nav_home)"
+              to="/"
+            />
+            <SidebarButton
+              collapsed={collapsed}
+              icon={<CircleHelp size={18} />}
+              label={UI_COPY.nav.help}
+              ariaLabel="术语/帮助 (nav_help)"
+              onClick={openHelp}
+            />
+            <div className="my-2 h-px bg-border" />
+            {projectId && selectionState !== "unset" ? (
+              navSections.map((section, index) => (
+                <div key={section}>
+                  <ProjectNavGroupTitle
+                    collapsed={collapsed}
+                    className={index === 0 ? undefined : "mt-2"}
+                    label={APP_SHELL_PROJECT_NAV_SECTION_TITLES[section]}
+                  />
+                  {renderProjectNavItems({
+                    section,
+                    projectId,
+                    collapsed,
+                  })}
                 </div>
-              )}
-              <div className="my-2 h-px bg-border" />
-              {collapsed ? null : (
-                <div className="px-3 pt-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-subtext">
-                  {UI_COPY.nav.groupAdmin}
-                </div>
-              )}
-              <SidebarLink
-                collapsed={collapsed}
-                icon={<UserCog size={18} />}
-                label={UI_COPY.nav.adminUsers}
-                ariaLabel="用户管理 (nav_admin_users)"
-                to="/admin/users"
-              />
-            </nav>
-          </LayoutGroup>
+              ))
+            ) : (
+              <div
+                className={clsx(
+                  "rounded-atelier border border-border bg-canvas p-3 text-xs text-subtext",
+                  collapsed && "hidden",
+                )}
+              >
+                {selectionState === "unset" ? "请先选择模式，再进入项目导航。" : UI_COPY.nav.chooseProjectHint}
+              </div>
+            )}
+            <div className="my-2 h-px bg-border" />
+            {collapsed ? null : (
+              <div className="px-3 pt-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-subtext">
+                {UI_COPY.nav.groupAdmin}
+              </div>
+            )}
+            <SidebarLink
+              collapsed={collapsed}
+              icon={<UserCog size={18} />}
+              label={UI_COPY.nav.adminUsers}
+              ariaLabel="用户管理 (nav_admin_users)"
+              to="/admin/users"
+            />
+          </nav>
         </aside>
 
         <main className="min-w-0 flex-1">
@@ -618,46 +611,11 @@ export function AppShell() {
         </main>
       </div>
 
-      <Drawer
-        open={helpOpen}
-        onClose={closeHelp}
-        ariaLabel={UI_COPY.help.title}
-        panelClassName="h-full w-full max-w-xl border-l border-border bg-canvas p-6 shadow-sm"
-      >
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="text-[11px] uppercase tracking-[0.18em] text-subtext">作者帮助</div>
-            <div className="mt-2 font-content text-2xl text-ink">{UI_COPY.help.title}</div>
-            <div className="mt-1 text-xs text-subtext">{UI_COPY.help.subtitle}</div>
-          </div>
-          <button className="btn btn-secondary" aria-label="关闭" onClick={closeHelp} type="button">
-            关闭
-          </button>
-        </div>
-
-        <div className="mt-4 grid gap-4">
-          <section className="grid gap-2">
-            <div className="text-sm font-semibold text-ink">{UI_COPY.help.termsTitle}</div>
-            <div className="grid gap-2">
-              {UI_COPY.help.terms.map((t) => (
-                <div key={t.label} className="rounded-atelier border border-border bg-surface p-3">
-                  <div className="text-sm text-ink">{t.label}</div>
-                  <div className="mt-1 text-xs text-subtext">{t.description}</div>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="grid gap-2">
-            <div className="text-sm font-semibold text-ink">{UI_COPY.help.tipsTitle}</div>
-            <ul className="list-disc pl-5 text-xs text-subtext">
-              {UI_COPY.help.tips.map((t) => (
-                <li key={t}>{t}</li>
-              ))}
-            </ul>
-          </section>
-        </div>
-      </Drawer>
+      {helpOpen ? (
+        <Suspense fallback={null}>
+          <LazyAppShellHelpDrawer open={helpOpen} onClose={closeHelp} />
+        </Suspense>
+      ) : null}
     </div>
   );
 }

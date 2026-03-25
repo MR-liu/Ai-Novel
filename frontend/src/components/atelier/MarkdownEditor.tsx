@@ -1,10 +1,9 @@
 import { useCallback, useId, useLayoutEffect, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { LayoutGroup, motion, useReducedMotion } from "framer-motion";
 import clsx from "clsx";
 
 import { transition } from "../../lib/motion";
+import { LazyMarkdownRenderer } from "./LazyMarkdownRenderer";
 
 type EditorTab = "edit" | "preview";
 
@@ -141,9 +140,12 @@ export function MarkdownEditor({
           }}
         />
       ) : (
-        <div className="atelier-content max-w-none px-3 py-4 text-ink">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{value || "_（空）_"}</ReactMarkdown>
-        </div>
+        <LazyMarkdownRenderer
+          className="atelier-content max-w-none px-3 py-4 text-ink"
+          fallbackClassName="px-3 py-4"
+          fallbackText="正在加载预览…"
+          content={value || "_（空）_"}
+        />
       )}
     </div>
   );
