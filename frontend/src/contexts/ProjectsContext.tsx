@@ -1,22 +1,23 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
-import { ApiError, apiJson } from "../services/apiClient";
-import type { Project } from "../types";
+import { ApiError } from "../services/apiClient";
+import { loadProjectList, readProjectListCache } from "../services/projectListCache";
 import { ProjectsContext } from "./projects";
 import type { ProjectsError } from "./projects";
 import type { ProjectsState } from "./projects";
 
 export function ProjectsProvider(props: { children: React.ReactNode }) {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [loading, setLoading] = useState(true);
+  const cachedProjects = readProjectListCache();
+  const [projects, setProjects] = useState(() => cachedProjects ?? []);
+  const [loading, setLoading] = useState(() => cachedProjects === null);
   const [error, setError] = useState<ProjectsError | null>(null);
 
-  const refresh = useCallback(async () => {
+  const load = useCallback(async (force: boolean) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await apiJson<{ projects: Project[] }>("/api/projects", { timeoutMs: 15_000 });
-      setProjects(res.data.projects ?? []);
+      const nextProjects = await loadProjectList({ force });
+      setProjects(nextProjects);
     } catch (e) {
       const err = e instanceof ApiError ? e : null;
       setError({
@@ -29,9 +30,14 @@ export function ProjectsProvider(props: { children: React.ReactNode }) {
     }
   }, []);
 
+  const refresh = useCallback(async () => {
+    await load(true);
+  }, [load]);
+
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    if (cachedProjects !== null) return;
+    void load(false);
+  }, [cachedProjects, load]);
 
   const value = useMemo<ProjectsState>(
     () => ({ projects, loading, error, refresh }),

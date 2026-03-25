@@ -4,7 +4,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { WizardNextBar } from "../../components/atelier/WizardNextBar";
 import { useToast } from "../../components/ui/toast";
 import { useAuth } from "../../contexts/auth";
-import { useProjects } from "../../contexts/projects";
+import { useCurrentProject } from "../../contexts/currentProject";
 import { useAutoSave } from "../../hooks/useAutoSave";
 import { usePersistentOutletIsActive } from "../../hooks/usePersistentOutlet";
 import { useProjectData } from "../../hooks/useProjectData";
@@ -14,6 +14,7 @@ import { buildStoryBiblePath, buildStudioAiPath } from "../../lib/projectRoutes"
 import { UI_COPY } from "../../lib/uiCopy";
 import { ApiError, apiJson } from "../../services/apiClient";
 import { getCurrentUserId } from "../../services/currentUser";
+import { upsertProjectListCache } from "../../services/projectListCache";
 import { writingMemoryInjectionEnabledStorageKey } from "../../services/uiState";
 import { markWizardProjectChanged } from "../../services/wizard";
 import type { Project, ProjectSettings } from "../../types";
@@ -70,7 +71,7 @@ export function useSettingsPageState(): SettingsPageState {
   const navigate = useNavigate();
   const toast = useToast();
   const auth = useAuth();
-  const { refresh } = useProjects();
+  const { setProject: setCurrentProject } = useCurrentProject();
   const outletActive = usePersistentOutletIsActive();
   const wizard = useWizardProgress(projectId);
   const refreshWizard = wizard.refresh;
@@ -81,7 +82,6 @@ export function useSettingsPageState(): SettingsPageState {
   const settingsSavePendingRef = useRef(false);
   const queuedSaveRef = useRef<null | { silent: boolean; snapshot?: SaveSnapshot }>(null);
   const wizardRefreshTimerRef = useRef<number | null>(null);
-  const projectsRefreshTimerRef = useRef<number | null>(null);
   const autoUpdateMasterRef = useRef<HTMLInputElement | null>(null);
   const [baselineProject, setBaselineProject] = useState<Project | null>(null);
   const [baselineSettings, setBaselineSettings] = useState<ProjectSettings | null>(null);
@@ -470,7 +470,6 @@ export function useSettingsPageState(): SettingsPageState {
   useEffect(() => {
     return () => {
       if (wizardRefreshTimerRef.current !== null) window.clearTimeout(wizardRefreshTimerRef.current);
-      if (projectsRefreshTimerRef.current !== null) window.clearTimeout(projectsRefreshTimerRef.current);
     };
   }, []);
 
@@ -606,10 +605,6 @@ export function useSettingsPageState(): SettingsPageState {
         if (wizardRefreshTimerRef.current !== null) window.clearTimeout(wizardRefreshTimerRef.current);
         wizardRefreshTimerRef.current = window.setTimeout(() => void refreshWizard(), 1200);
       };
-      const scheduleProjectsRefresh = () => {
-        if (projectsRefreshTimerRef.current !== null) window.clearTimeout(projectsRefreshTimerRef.current);
-        projectsRefreshTimerRef.current = window.setTimeout(() => void refresh(), 1200);
-      };
 
       settingsSavePendingRef.current = settingsDirty;
       savingRef.current = true;
@@ -669,7 +664,11 @@ export function useSettingsPageState(): SettingsPageState {
             : null,
         ]);
 
-        if (pRes) setBaselineProject(pRes.data.project);
+        if (pRes) {
+          setBaselineProject(pRes.data.project);
+          setCurrentProject(pRes.data.project);
+          upsertProjectListCache(pRes.data.project);
+        }
         if (sRes) {
           setBaselineSettings(sRes.data.settings);
           setRerankApiKeyDraft("");
@@ -681,10 +680,8 @@ export function useSettingsPageState(): SettingsPageState {
         markWizardProjectChanged(projectId);
         bumpWizardLocal();
         if (silent) {
-          scheduleProjectsRefresh();
           scheduleWizardRefresh();
         } else {
-          await refresh();
           await refreshWizard();
           toast.toastSuccess("已保存");
         }
@@ -711,9 +708,9 @@ export function useSettingsPageState(): SettingsPageState {
       bumpWizardLocal,
       projectForm,
       projectId,
-      refresh,
       refreshWizard,
       settingsForm,
+      setCurrentProject,
       toast,
       rerankApiKeyClearRequested,
       rerankApiKeyDraft,

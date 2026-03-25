@@ -1,12 +1,12 @@
 import { Link, Outlet, useParams } from "react-router-dom";
 
 import { FeedbackStateCard } from "../ui/Feedback";
-import { useProjects } from "../../contexts/projects";
+import { useCurrentProject } from "../../contexts/currentProject";
 import { UI_COPY } from "../../lib/uiCopy";
 
 export function ProjectProviderGuard() {
   const { projectId } = useParams();
-  const { projects, loading, error, refresh } = useProjects();
+  const { project, loading, error, refresh } = useCurrentProject();
 
   if (!projectId) return <Outlet />;
   if (loading) {
@@ -17,11 +17,13 @@ export function ProjectProviderGuard() {
     );
   }
   if (error) {
+    const missingProject = error.status === 403 || error.status === 404;
     return (
       <FeedbackStateCard
         tone="danger"
-        title="项目加载失败"
-        description={error.message}
+        kicker={missingProject ? "项目状态" : undefined}
+        title={missingProject ? "项目不存在或无权限" : "项目加载失败"}
+        description={missingProject ? `请返回${UI_COPY.nav.home}重新选择项目，或稍后重试。` : error.message}
         meta={
           error.requestId ? (
             <>
@@ -32,7 +34,7 @@ export function ProjectProviderGuard() {
         actions={
           <>
             <button className="btn btn-secondary" onClick={() => void refresh()} type="button">
-              重试
+              {missingProject ? "重新检查" : "重试"}
             </button>
             <Link className="btn btn-ghost" to="/" aria-label="返回首页 (project_guard_back_home)">
               {UI_COPY.nav.backToHome}
@@ -54,30 +56,7 @@ export function ProjectProviderGuard() {
     );
   }
 
-  const exists = projects.some((p) => p.id === projectId);
-  if (!exists) {
-    return (
-      <FeedbackStateCard
-        kicker="项目状态"
-        title="项目不存在或无权限"
-        description={`请返回${UI_COPY.nav.home}重新选择项目，或在左侧切换其他项目。`}
-        actions={
-          <>
-            <Link className="btn btn-secondary" to="/" aria-label="返回首页 (project_guard_back_home)">
-              {UI_COPY.nav.backToHome}
-            </Link>
-            <button
-              className="btn btn-ghost"
-              onClick={() => void refresh()}
-              type="button"
-            >
-              重新加载项目列表
-            </button>
-          </>
-        }
-      />
-    );
-  }
+  if (!project) return null;
 
   return <Outlet />;
 }

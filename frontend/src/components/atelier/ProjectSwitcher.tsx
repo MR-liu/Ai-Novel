@@ -1,32 +1,53 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
-import { useProjects } from "../../contexts/projects";
+import { useCurrentProject } from "../../contexts/currentProject";
 import { buildProjectWritePath } from "../../lib/projectRoutes";
 import { UI_COPY } from "../../lib/uiCopy";
+import { ApiError } from "../../services/apiClient";
+import { loadProjectList, readProjectListCache } from "../../services/projectListCache";
+import type { Project } from "../../types";
 
 export function ProjectSwitcher() {
-  const { projects, loading } = useProjects();
+  const { project: currentProject, loading: currentProjectLoading } = useCurrentProject();
   const { projectId } = useParams();
   const navigate = useNavigate();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
+  const initialProjects = readProjectListCache();
+  const [projects, setProjects] = useState<Project[]>(() => initialProjects ?? []);
+  const [projectsLoaded, setProjectsLoaded] = useState(() => initialProjects !== null);
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
 
   const selected = useMemo(() => {
     if (projectId) return projectId;
     return "";
   }, [projectId]);
 
-  const selectedProjectName = useMemo(() => {
-    const found = projects.find((p) => p.id === selected);
-    return found?.name ?? "";
-  }, [projects, selected]);
+  const selectedProjectName = currentProject?.id === selected ? currentProject.name : currentProject?.name ?? "";
+
+  const ensureProjectsLoaded = useCallback(async (force = false) => {
+    setProjectsLoading(true);
+    setProjectsError(null);
+    try {
+      const nextProjects = await loadProjectList({ force });
+      setProjects(nextProjects);
+      setProjectsLoaded(true);
+    } catch (e) {
+      const err = e instanceof ApiError ? e : null;
+      setProjectsError(err?.message ?? "加载项目失败，请稍后重试");
+    } finally {
+      setProjectsLoading(false);
+    }
+  }, []);
 
   const buttonLabel = useMemo(() => {
     if (selectedProjectName) return selectedProjectName;
-    if (loading) return "加载中…";
-    return projects.length === 0 ? "暂无项目" : "请选择项目";
-  }, [loading, projects.length, selectedProjectName]);
+    if (currentProjectLoading) return "加载中…";
+    if (projectsLoading && !projectsLoaded) return "加载中…";
+    return projectsLoaded && projects.length === 0 ? "暂无项目" : "请选择项目";
+  }, [currentProjectLoading, projects.length, projectsLoaded, projectsLoading, selectedProjectName]);
 
   useEffect(() => {
     if (!open) return;
@@ -47,6 +68,11 @@ export function ProjectSwitcher() {
     };
   }, [open]);
 
+  useEffect(() => {
+    if (!open || projectsLoaded || projectsLoading) return;
+    void ensureProjectsLoaded();
+  }, [ensureProjectsLoaded, open, projectsLoaded, projectsLoading]);
+
   return (
     <div className="flex flex-col gap-2" ref={rootRef}>
       <div className="flex items-center justify-between">
@@ -66,7 +92,7 @@ export function ProjectSwitcher() {
           aria-label="project_switcher"
           aria-haspopup="listbox"
           aria-expanded={open}
-          disabled={loading}
+          disabled={currentProjectLoading}
           onClick={() => setOpen((v) => !v)}
         >
           <span className="min-w-0 truncate">{buttonLabel}</span>
@@ -94,7 +120,20 @@ export function ProjectSwitcher() {
             </div>
             <div className="h-px bg-border" />
             <div className="max-h-80 overflow-auto p-1">
-              {projects.length === 0 ? (
+              {projectsLoading && !projectsLoaded ? (
+                <div className="px-3 py-2 text-sm text-subtext">加载项目列表中...</div>
+              ) : projectsError ? (
+                <div className="grid gap-2 px-3 py-2">
+                  <div className="text-sm text-subtext">{projectsError}</div>
+                  <button
+                    className="ui-focus-ring ui-transition-fast rounded-atelier border border-border px-3 py-2 text-left text-sm text-ink hover:bg-canvas"
+                    type="button"
+                    onClick={() => void ensureProjectsLoaded(true)}
+                  >
+                    重试加载项目列表
+                  </button>
+                </div>
+              ) : projects.length === 0 ? (
                 <div className="px-3 py-2 text-sm text-subtext">暂无项目</div>
               ) : (
                 projects.map((p) => (

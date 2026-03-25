@@ -9,7 +9,7 @@ import { WizardNextBar } from "../components/atelier/WizardNextBar";
 import { ProgressBar } from "../components/ui/ProgressBar";
 import { useConfirm } from "../components/ui/confirm";
 import { useToast } from "../components/ui/toast";
-import { useProjects } from "../contexts/projects";
+import { useCurrentProject } from "../contexts/currentProject";
 import { buildProjectOutlinePath, buildProjectWritePath, buildStudioAiPath } from "../lib/projectRoutes";
 import { useChapterMetaList } from "../hooks/useChapterMetaList";
 import { useProjectData } from "../hooks/useProjectData";
@@ -45,9 +45,7 @@ export function ProjectWizardPage() {
   const toast = useToast();
   const confirm = useConfirm();
   const reduceMotion = useReducedMotion();
-  const { projects } = useProjects();
-
-  const project = useMemo(() => projects.find((p) => p.id === projectId) ?? null, [projectId, projects]);
+  const { project } = useCurrentProject();
 
   const [version, setVersion] = useState(0);
   const [autoRunning, setAutoRunning] = useState(false);

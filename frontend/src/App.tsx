@@ -8,7 +8,7 @@ import { ConfirmProvider } from "./components/ui/ConfirmProvider";
 import { ToastProvider } from "./components/ui/ToastProvider";
 import { AppModeProvider } from "./contexts/AppModeContext";
 import { AuthProvider } from "./contexts/AuthContext";
-import { ProjectsProvider } from "./contexts/ProjectsContext";
+import { CurrentProjectProvider } from "./contexts/CurrentProjectContext";
 import { importWithChunkRetry } from "./lib/lazyImportRetry";
 import { LEGACY_PROJECT_REDIRECTS } from "./lib/legacyProjectRedirects";
 import { buildProjectHomePath } from "./lib/projectRoutes";
@@ -25,9 +25,9 @@ const RegisterPage = lazy(async () => {
   return { default: mod.RegisterPage };
 });
 
-const DashboardPage = lazy(async () => {
-  const mod = await importWithChunkRetry(() => import("./pages/DashboardPage"));
-  return { default: mod.DashboardPage };
+const DashboardRoute = lazy(async () => {
+  const mod = await importWithChunkRetry(() => import("./pages/DashboardRoute"));
+  return { default: mod.DashboardRoute };
 });
 
 const AdminUsersPage = lazy(async () => {
@@ -113,17 +113,17 @@ const router = createBrowserRouter([
       {
         path: "/",
         element: (
-          <ProjectsProvider>
-            <AppModeProvider>
+          <AppModeProvider>
+            <CurrentProjectProvider>
               <AppShell />
-            </AppModeProvider>
-          </ProjectsProvider>
+            </CurrentProjectProvider>
+          </AppModeProvider>
         ),
         errorElement: <RouteErrorPage />,
         children: [
           {
             index: true,
-            element: <DashboardPage />,
+            element: <DashboardRoute />,
           },
           {
             path: "admin/users",

@@ -1,7 +1,7 @@
 import { Link, Navigate, useParams } from "react-router-dom";
 
 import { AuthorPageIntro, AuthorPageTabs } from "../components/layout/AuthorPageScaffold";
-import { useProjects } from "../contexts/projects";
+import { useCurrentProject } from "../contexts/currentProject";
 import { useWizardProgress } from "../hooks/useWizardProgress";
 import {
   buildProjectHomePath,
@@ -32,9 +32,8 @@ function formatDateLabel(value: string | null | undefined): string {
 }
 
 function ProjectHomeOverview(props: { projectId: string }) {
-  const { projects } = useProjects();
+  const { project } = useCurrentProject();
   const { loading, progress } = useWizardProgress(props.projectId);
-  const project = projects.find((item) => item.id === props.projectId) ?? null;
   const nextHref = progress.nextStep?.href ?? buildProjectWritePath(props.projectId);
   const nextLabel = progress.nextStep ? `下一步：${progress.nextStep.title}` : "进入写作";
   const quickLinks = getProjectHomeQuickLinks(props.projectId);

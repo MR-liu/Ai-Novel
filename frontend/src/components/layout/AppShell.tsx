@@ -13,7 +13,6 @@ import { UI_COPY } from "../../lib/uiCopy";
 import { getCurrentUserId } from "../../services/currentUser";
 import { sidebarCollapsedStorageKey } from "../../services/uiState";
 import { ThemeToggle } from "../atelier/ThemeToggle";
-import { ModeSelectionPanel } from "./AuthorPageScaffold";
 import {
   APP_SHELL_PROJECT_NAV_SECTION_TITLES,
   getAppShellProjectNavItems,
@@ -29,6 +28,11 @@ const LazyAppShellHelpDrawer = lazy(async () => {
 const LazyProjectSwitcher = lazy(async () => {
   const mod = await importWithChunkRetry(() => import("../atelier/ProjectSwitcher"));
   return { default: mod.ProjectSwitcher };
+});
+
+const LazyModeSelectionPanel = lazy(async () => {
+  const mod = await importWithChunkRetry(() => import("./AuthorPageScaffold"));
+  return { default: mod.ModeSelectionPanel };
 });
 
 function useSidebarCollapsed(): [boolean, (v: boolean) => void] {
@@ -212,6 +216,14 @@ function ProjectSwitcherFallback() {
   return (
     <div className="rounded-atelier border border-border bg-canvas/70 p-3 text-xs text-subtext">
       正在加载项目切换器…
+    </div>
+  );
+}
+
+function ModeSelectionPanelFallback() {
+  return (
+    <div className="mx-auto max-w-6xl rounded-atelier border border-border bg-canvas/70 p-6 text-sm text-subtext">
+      正在加载模式选择面板…
     </div>
   );
 }
@@ -606,7 +618,13 @@ export function AppShell() {
             </div>
           </header>
           <div className={clsx("mx-auto px-4 py-6 sm:px-6 sm:py-8 lg:px-8", mainMaxWidth)}>
-            {selectionState === "unset" ? <ModeSelectionPanel /> : <PersistentOutlet activeKey={pathname} />}
+            {selectionState === "unset" ? (
+              <Suspense fallback={<ModeSelectionPanelFallback />}>
+                <LazyModeSelectionPanel />
+              </Suspense>
+            ) : (
+              <PersistentOutlet activeKey={pathname} />
+            )}
           </div>
         </main>
       </div>

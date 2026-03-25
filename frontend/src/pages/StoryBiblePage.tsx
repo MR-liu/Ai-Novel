@@ -2,7 +2,7 @@ import { Link, Navigate, useParams } from "react-router-dom";
 
 import { StudioModeRequiredPanel, AuthorPageIntro, AuthorPageTabs } from "../components/layout/AuthorPageScaffold";
 import { useAppMode } from "../contexts/AppModeContext";
-import { useProjects } from "../contexts/projects";
+import { useCurrentProject } from "../contexts/currentProject";
 import { useWizardProgress } from "../hooks/useWizardProgress";
 import { buildStoryBiblePath, type StoryBibleTab } from "../lib/projectRoutes";
 
@@ -20,10 +20,9 @@ const LazyNumericTablesPage = lazyPage(() => import("./NumericTablesPage"), (mod
 const LazyWorldBookPage = lazyPage(() => import("./WorldBookPage"), (mod) => mod.WorldBookPage);
 
 function StoryBibleOverview(props: { projectId: string }) {
-  const { projects } = useProjects();
+  const { project } = useCurrentProject();
   const { mode } = useAppMode();
   const { progress } = useWizardProgress(props.projectId);
-  const project = projects.find((item) => item.id === props.projectId) ?? null;
   const cards = getStoryBibleOverviewCards(props.projectId);
   const mainCards = cards.slice(0, 4);
   const continuityCard = cards.find((item) => item.key === "continuity")!;
